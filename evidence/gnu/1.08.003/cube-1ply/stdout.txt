@@ -1,0 +1,123 @@
+GNU Backgammon 1.08.003 20260710
+
+Copyright (C) 1999-2004 Gary Wong.
+Copyright (C) 2004-2024 the AUTHORS; for details type `show version'.
+
+This program comes with ABSOLUTELY NO WARRANTY; for details type `show warranty'.
+This is free software, and you are welcome to redistribute it under certain conditions; type `show copying' for details.
+
+Will not ask for confirmation before aborting games in progress.
+Will not ask for confirmation overwriting existing files.
+Player 0 is now known as `player0'.
+Player 1 is now known as `player1'.
+Default variation is: Standard backgammon
+Please start a new match or session to play `Standard backgammon'
+Use of the doubling cube is permitted.
+Will not use the Jacoby rule for money sessions.
+No beavers allowed in money sessions.
+The number of threads has been set to 1.
+Probabilities and equities will be shown with 6 digits after the decimal separator
+Game winning chances will be shown as probabilities.
+Match winning chances will be shown as probabilities.
+Match evaluations will be shown as equivalent money equity.
+TTY boards will be given in ASCII.
+`eval' and `hint' chequerplay will now use Neural net evaluation.
+`eval' and `hint' chequerplay will use 1 ply evaluation.
+`eval' and `hint' chequerplay will use cubeful evaluation.
+
+`eval' and `hint' chequerplay will use deterministic noise.
+
+(Note that this setting will have no effect unless you set noise to some non-zero value.)
+`eval' and `hint' chequerplay will use noiseless evaluations.
+`eval' and `hint' chequerplay will not use pruning.
+
+`eval' and `hint' cube decisions will now use Neural net evaluation.
+`eval' and `hint' cube decisions will use 1 ply evaluation.
+`eval' and `hint' cube decisions will use cubeful evaluation.
+
+`eval' and `hint' cube decisions will use deterministic noise.
+
+(Note that this setting will have no effect unless you set noise to some non-zero value.)
+`eval' and `hint' cube decisions will use noiseless evaluations.
+`eval' and `hint' cube decisions will not use pruning.
+
+Setting GNUbg ID bD3BAQyYd2cEAA:cAngAAAAAAAE
+ GNU Backgammon  Position ID: bD3BAQyYd2cEAA
+                 Match ID   : cAngAAAAAAAE
+ +13-14-15-16-17-18------19-20-21-22-23-24-+     O: player0
+ | X           O    |   | O  O  O  O       |     0 points
+ |                  |   | O     O  O       |     
+ |                  |   | O                |     
+ |                  |   | O                |     
+ |                  |   |                  |    
+v|                  |BAR|                  |     7 points match (Cube: 1)
+ |                  |   |                  |    
+ |                  |   | X                |     
+ | O           X  X |   | X                |     
+ | O     X     X  X |   | X     X  O       |     On roll
+ | O     X     X  X |   | X     X  O       |     0 points
+ +12-11-10--9--8--7-------6--5--4--3--2--1-+     X: player1
+
+ GNU Backgammon  Position ID: bD3BAQyYd2cEAA
+                 Match ID   : cAngAAAAAAAE
+ +13-14-15-16-17-18------19-20-21-22-23-24-+     O: player0
+ | X           O    |   | O  O  O  O       |     0 points
+ |                  |   | O     O  O       |     
+ |                  |   | O                |     
+ |                  |   | O                |     
+ |                  |   |                  |    
+v|                  |BAR|                  |     7 points match (Cube: 1)
+ |                  |   |                  |    
+ |                  |   | X                |     
+ | O           X  X |   | X                |     
+ | O     X     X  X |   | X     X  O       |     On roll
+ | O     X     X  X |   | X     X  O       |     0 points
+ +12-11-10--9--8--7-------6--5--4--3--2--1-+     X: player1
+
+player1 has not yet rolled the dice.
+The cube is at 1, and is centred.The score (after 0 games) is: player0 0, player1 0 (match to 7 points)player1 in on roll.
+This game is not the Crawford game.
+New money sessions are played without the Jacoby rule.
+No beavers allowed in money sessions.
+`eval' and `hint' will use:
+    Chequer play:
+      Neural net evaluation:
+        1-ply evaluation.
+        Not using pruning neural nets.        Cubeful evaluations.
+        Noiseless evaluations.
+    Move filters:
+      Move filter for 1 ply:
+        keep the first 0 0-ply moves and up to 8 more moves within equity 0.16
+      Move filter for 2 ply:
+        keep the first 0 0-ply moves and up to 8 more moves within equity 0.16
+        Skip pruning for 1-ply moves.
+      Move filter for 3 ply:
+        keep the first 0 0-ply moves and up to 8 more moves within equity 0.16
+        Skip pruning for 1-ply moves.
+        keep the first 0 2-ply moves and up to 2 more moves within equity 0.04
+      Move filter for 4 ply:
+        keep the first 0 0-ply moves and up to 8 more moves within equity 0.16
+        Skip pruning for 1-ply moves.
+        keep the first 0 2-ply moves and up to 2 more moves within equity 0.04
+        Skip pruning for 3-ply moves.
+
+    Cube decisions:
+      Neural net evaluation:
+        1-ply evaluation.
+        Not using pruning neural nets.        Cubeful evaluations.
+        Noiseless evaluations.
+1 calculation thread.
+Match winning chances will be shown as probabilities.
+Match equities shown in EMG (normalized money game equity) (match play only).
+Game winning chances will be shown as probabilities.
+Boards will be shown in ASCII.
+
+Cube analysis
+1-ply cubeless equity +0.639825 (Money: +0.639181)
+  0.803315 0.044522 0.000281 - 0.196685 0.012247 0.000004
+Cubeful equities:
+1. Double, pass        +1.000000
+2. Double, take        +1.147237  (+0.147236)
+3. No double           +0.917251  (-0.082750)
+Proper cube action: Double, pass
+

@@ -1,0 +1,410 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://backgammonmadesimple.org/schemas/universal-position-v1.schema.json",
+  "title": "Universal Backgammon Position v1 Candidate, cleanup revision 1.2.2",
+  "description": "Engine-relevant semantic state only. The contract begins after the opening roll has resolved and an on-roll player is established. Source provenance, display view, and appearance are separate contracts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "players",
+    "board",
+    "state",
+    "cube",
+    "score",
+    "rules"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "universal-position-v1"
+    },
+    "players": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "const": "player_0"
+        },
+        {
+          "const": "player_1"
+        }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "board": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coordinate_system",
+        "checker_count",
+        "player_0",
+        "player_1"
+      ],
+      "properties": {
+        "coordinate_system": {
+          "const": "self_relative_points"
+        },
+        "checker_count": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "player_0",
+            "player_1"
+          ],
+          "properties": {
+            "player_0": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "player_1": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "player_0": {
+          "$ref": "#/$defs/player_board"
+        },
+        "player_1": {
+          "$ref": "#/$defs/player_board"
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "game_state",
+        "on_roll",
+        "decision_player",
+        "phase",
+        "decision_type",
+        "dice"
+      ],
+      "properties": {
+        "game_state": {
+          "type": "string",
+          "enum": [
+            "setup",
+            "playing",
+            "game_over",
+            "resigned",
+            "unknown"
+          ]
+        },
+        "on_roll": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "player_0",
+            "player_1",
+            null
+          ]
+        },
+        "decision_player": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "player_0",
+            "player_1",
+            null
+          ]
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "setup",
+            "pre_roll",
+            "checker_play",
+            "cube_response",
+            "beaver_response",
+            "raccoon_response",
+            "resignation_response",
+            "game_over",
+            "unknown"
+          ],
+          "description": "The unresolved opening-roll procedure is outside universal-position-v1. pre_roll starts only after an on-roll player has been established."
+        },
+        "decision_type": {
+          "type": "string",
+          "enum": [
+            "none",
+            "roll",
+            "roll_or_double",
+            "checker_play",
+            "take_or_drop",
+            "take_drop_or_beaver",
+            "take_drop_or_raccoon",
+            "accept_or_reject_resignation",
+            "unknown"
+          ],
+          "description": "The action choices currently available to decision_player. It is derived from phase, pending action, cube state, and rule context rather than supplied as an external rule."
+        },
+        "dice": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 6
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          ]
+        }
+      }
+    },
+    "cube": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "value",
+        "owner",
+        "pending_action"
+      ],
+      "properties": {
+        "enabled": {
+          "description": "true means cubeful play is positively established; false means cubeless or NoCube is positively established; null means the source did not establish whether the cube is enabled. A source may still encode nominal cube value and ownership while enabled remains unknown.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "value": {
+          "description": "Current accepted cube value before any pending action. It is not the proposed value of a pending double, beaver, or raccoon.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "owner": {
+          "description": "Current accepted cube ownership before any pending action.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "center",
+            "player_0",
+            "player_1",
+            null
+          ]
+        },
+        "pending_action": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "offerer",
+            "responder",
+            "offered_cube_value",
+            "resignation_multiplier"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "none",
+                "double",
+                "beaver",
+                "raccoon",
+                "resignation",
+                "unknown"
+              ]
+            },
+            "offerer": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "player_0",
+                "player_1",
+                null
+              ]
+            },
+            "responder": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "player_0",
+                "player_1",
+                null
+              ]
+            },
+            "offered_cube_value": {
+              "description": "The proposed accepted cube value. For double, beaver, and raccoon in v1, this must equal the current accepted cube.value multiplied by two.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "resignation_multiplier": {
+              "description": "1 for a single-game resignation, 2 for a gammon resignation, 3 for a backgammon resignation. Actual points equal cube.value times this multiplier.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 3
+            }
+          }
+        }
+      }
+    },
+    "score": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "player_0",
+        "player_1",
+        "match_length"
+      ],
+      "properties": {
+        "player_0": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "player_1": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "match_length": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "rules": {
+      "description": "Analysis-semantic rule context. position-source-v1 records whether each value was decoded, supplied externally, or remains unknown.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "variation",
+        "crawford",
+        "jacoby",
+        "beavers",
+        "raccoons",
+        "automatic_doubles",
+        "maximum_cube"
+      ],
+      "properties": {
+        "variation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "standard",
+            "nackgammon",
+            "hypergammon_1",
+            "hypergammon_2",
+            "hypergammon_3",
+            "other",
+            null
+          ]
+        },
+        "crawford": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "jacoby": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "beavers": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "raccoons": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "automatic_doubles": {
+          "description": "Maximum automatic doubles permitted. Zero means disabled.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "maximum_cube": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "player_board": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "points",
+        "bar",
+        "off"
+      ],
+      "properties": {
+        "points": {
+          "description": "Length 24. Array index 0 is this player's point 1; array index 23 is this player's point 24.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minItems": 24,
+          "maxItems": 24
+        },
+        "bar": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "off": {
+          "description": "Stored explicitly and validated against checker_count, points, and bar.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "x-bms-invariants": [
+    "For n in 1..24, player_0.points[n-1] and player_1.points[24-n] refer to the same physical point and cannot both be positive.",
+    "For each player, sum(points) + bar + off equals checker_count.",
+    "Known cube values and maximum cube values are powers of two.",
+    "The unresolved opening-roll procedure is outside v1. Every playing position has an established on_roll player.",
+    "Pre-roll doubling legality is three-valued: legal, illegal, or unknown. decision_type maps legal to roll_or_double, illegal to roll, and unknown to unknown.",
+    "A pre-roll double is legal only when cube.enabled is true, Crawford is false, cube ownership permits the on-roll player to double, and current and maximum cube values are both known with current value below maximum.",
+    "For pending double, beaver, or raccoon, offered_cube_value equals cube.value times two, decision_player equals responder, and offerer differs from responder.",
+    "For pending double and raccoon, on_roll equals offerer. For pending beaver, on_roll equals responder.",
+    "For pending double, cube.owner is center or offerer. For pending beaver, cube.owner is offerer. For pending raccoon, cube.owner is responder.",
+    "A pending double decision is take_drop_or_beaver only when beaver availability is positively established, take_or_drop when positively unavailable, and unknown otherwise.",
+    "A pending beaver decision is take_drop_or_raccoon only when raccoon availability is positively established, take_or_drop when positively unavailable, and unknown otherwise.",
+    "A pending raccoon decision is take_or_drop. Otters and later animal redoubles are outside v1.",
+    "game_state playing is required for pre_roll, checker_play, cube_response, beaver_response, raccoon_response, and resignation_response. game_state game_over is required for phase game_over."
+  ]
+}

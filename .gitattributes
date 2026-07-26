@@ -1,0 +1,4 @@
+evidence/gnu/**/stdout.txt whitespace=-trailing-space,-blank-at-eof
+
+# Checksum-controlled evidence must retain exact committed bytes on every platform.
+evidence/** -text

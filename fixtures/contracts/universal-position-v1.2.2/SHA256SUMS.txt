@@ -1,0 +1,8 @@
+7cf9b2ef78232670819e2d28a57f514246f6dd3840abc6c60ec3bb67ff2968af  ../../../src/backgammon_engine_kit/position_contract/schemas/backgammon-view-v1.schema.json
+174145916b5032198064b023716f88165d1b66809a2a3008251e1cd3246c8c96  ../../../src/backgammon_engine_kit/position_contract/schemas/position-source-v1.schema.json
+67fd6e7566e5720b4999c80b4e4ea52c93f370e1104dd59b8f1a4bcafd321a75  ../../../src/backgammon_engine_kit/position_contract/schemas/universal-position-v1.schema.json
+efe9a4869e06c6e7a22388f0bdbed3b8dfc50e4c759bf8088ec5e6bc2e223bcf  cross-format/position-a.cross-format-parity.json
+7a5544ab4d4f506f3a813799f9a1103be42afd725fb71ebcb1b98c9c1f237bb2  cross-format/position-b.cross-format-parity.json
+1873f45f3e9467ed51c6da6dc786e2caa29706da7419867b32f80c99da6c0810  semantic-actions/pending-beaver.semantic.json
+2074baf3c907ac41b51868c007679ab69947cdcd2ceda88684675efca0110064  semantic-actions/pending-double.semantic.json
+ca8df1851605be68b65eb7dffbe74be232d40c1ad14bd946d1ef19ac8b18b2a8  semantic-actions/pending-raccoon.semantic.json

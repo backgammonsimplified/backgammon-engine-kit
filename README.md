@@ -48,6 +48,38 @@ The XGID and GNU combined-ID decoders have intentionally bounded support. See
 the [support matrix](docs/architecture/UNIVERSAL_POSITION_V1_SUPPORT_MATRIX.md)
 for represented, external-context, and unsupported state.
 
+## Renderer Position
+
+The renderer-facing API composes separate validated Universal Position and
+Backgammon View contracts with their respective hashes:
+
+```python
+from backgammon_engine_kit import (
+    renderer_position_from_xgid,
+    renderer_position_json,
+)
+
+renderer_position = renderer_position_from_xgid(
+    "XGID=-A-B--A---------------d---:0:0:1:00:0:0:0:0:10"
+)
+print(renderer_position_json(renderer_position))
+```
+
+The CLI accepts the supported XGID and GNU combined-ID forms:
+
+```bash
+backgammon-engine-kit render-xgid \
+  'XGID=-A-B--A---------------d---:0:0:1:00:0:0:0:0:10'
+backgammon-engine-kit render-gnuid \
+  'PAAAICMAAAAAAA:cAkAAAAAAAAE'
+```
+
+Successful renderer commands emit only deterministic envelope JSON. They do not
+invoke GNU Backgammon or Sage and do not render SVG or another board image. See
+the [Renderer Position interface](docs/architecture/RENDERER_POSITION_INTERFACE.md)
+for Python signatures, view defaults, orientation, unknown facts, and CLI
+failure behavior.
+
 ## JSON CLI and evidence fixtures
 
 The foreground CLI reads one JSON object from standard input and writes one

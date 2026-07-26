@@ -3,7 +3,11 @@
 from .bgsage import BGSageConversionError, BGSagePosition, canonical_to_bgsage
 from .decoders import decode_gnuid, decode_xgid
 from .enrichment import EnrichmentError, enrich_position
-from .gnu_bridge import GnuSourceBridgeError, verify_gnu_source_bridge, with_source_hash
+from .gnu_bridge import (
+    GnuSourceBridgeError,
+    verify_gnu_source_bridge,
+    with_source_hash,
+)
 from .hashing import (
     semantic_state_hash,
     semantic_state_json,
@@ -30,6 +34,15 @@ from .models import (
     RawSource,
     RuleState,
     UniversalPosition,
+)
+from .renderer import (
+    RendererPosition,
+    RendererPositionError,
+    create_renderer_position,
+    default_backgammon_view,
+    renderer_position_from_gnuid,
+    renderer_position_from_xgid,
+    renderer_position_json,
 )
 from .semantics import ILLEGAL, LEGAL, UNKNOWN, derive_state, doubling_legality
 from .validation import (
@@ -64,16 +77,23 @@ __all__ = [
     "PositionSource",
     "PositionState",
     "RawSource",
+    "RendererPosition",
+    "RendererPositionError",
     "RuleState",
     "UNKNOWN",
     "UniversalPosition",
     "canonical_to_bgsage",
+    "create_renderer_position",
     "decode_gnuid",
     "decode_xgid",
     "derive_state",
     "doubling_legality",
+    "default_backgammon_view",
     "enrich_position",
     "semantic_state_hash",
+    "renderer_position_from_gnuid",
+    "renderer_position_from_xgid",
+    "renderer_position_json",
     "semantic_state_json",
     "source_record_hash",
     "source_record_json",

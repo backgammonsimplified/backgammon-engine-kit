@@ -15,8 +15,9 @@ GNU and Sage settings, including Sage rollout, remain unavailable.
 
 ## Requirements and installation
 
-The package declares Python `>=3.7`. This baseline was tested only on Python
-3.12.8; it does not claim testing on other Python versions.
+The package declares Python `>=3.8`, matching its `ankigammon>=1.7,<1.8`
+dependency. This identifier-bridge change was tested on Python 3.10 and probed
+on Python 3.12.8; it does not claim testing on every supported Python version.
 
 ```bash
 python -m pip install .
@@ -47,6 +48,33 @@ print(source.schema_version)    # position-source-v1
 The XGID and GNU combined-ID decoders have intentionally bounded support. See
 the [support matrix](docs/architecture/UNIVERSAL_POSITION_V1_SUPPORT_MATRIX.md)
 for represented, external-context, and unsupported state.
+
+## Identifier-to-request bridge
+
+The public bridge parses complete GNUIDs, Position IDs, and XGIDs through
+`ankigammon.utils.gnuid` and `ankigammon.utils.xgid`. It retains the exact raw
+identifier, native metadata, canonical checker placement, source orientation,
+player mapping, normalization effects, and explicit unavailable state.
+
+```python
+from backgammon_engine_kit import to_gnu_request, to_sage_request
+
+checker = to_gnu_request("4PPgASTgc/ABMA:cAnqAAAAAAAE", "checker")
+cube = to_sage_request(
+    "XGID=---bB-DCC-B-cA---a-dabb---:2:1:1:00:4:2:1:7:10",
+    "cube",
+)
+
+if checker.ready and cube.ready:
+    checker_request = checker.request
+    cube_request = cube.request
+```
+
+These calls only prepare `AnalysisRequest` values. They do not execute an
+engine or claim that GNU and Sage outputs are semantically equivalent. A lone
+Position ID returns `status="unavailable"` until its missing turn, dice, cube,
+score, and match state are explicitly supplied. See the committed
+[Node-consumption example](examples/node_identifier_bridge.py).
 
 ## Renderer Position
 

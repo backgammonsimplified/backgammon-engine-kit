@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +26,8 @@ def test_cli_validates_request_and_generates_cache_key():
 def test_foreground_cli_has_deterministic_json_io():
     root = Path(__file__).resolve().parents[1]
     command = [sys.executable, "-m", "backgammon_engine_kit"]
-    env = {"PYTHONPATH": str(root / "src")}
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root / "src")
     payload = '{"operation":"capabilities"}'
     first = subprocess.run(command, input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     second = subprocess.run(command, input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)

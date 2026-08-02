@@ -21,6 +21,20 @@ from .models import (
     RawSource,
 )
 from .serialization import canonical_json
+from .identifier_bridge import (
+    CanonicalAnalysisRequest,
+    CanonicalAnalysisState,
+    CanonicalCheckerPosition,
+    IdentifierBridgeError,
+    ParsedAnalysisIdentifier,
+    PreparedAnalysisRequest,
+    UnsupportedAnalysisIdentifier,
+    detect_identifier_format,
+    parse_analysis_identifier,
+    to_canonical_analysis_request,
+    to_gnu_request,
+    to_sage_request,
+)
 
 from .position_contract import (
     BackgammonView,
@@ -45,6 +59,18 @@ from .position_contract import (
 
 __all__ = [
     "ANALYSIS_SETTINGS",
+    "CanonicalAnalysisRequest",
+    "CanonicalAnalysisState",
+    "CanonicalCheckerPosition",
+    "IdentifierBridgeError",
+    "ParsedAnalysisIdentifier",
+    "PreparedAnalysisRequest",
+    "UnsupportedAnalysisIdentifier",
+    "detect_identifier_format",
+    "parse_analysis_identifier",
+    "to_canonical_analysis_request",
+    "to_gnu_request",
+    "to_sage_request",
     "BackgammonView",
     "PositionSource",
     "RendererPosition",

@@ -9,7 +9,7 @@ from backgammon_engine_kit import to_gnu_request, to_sage_request
 
 
 CHECKER_GNUID = "4PPgASTgc/ABMA:cAnqAAAAAAAE"
-CUBE_XGID = "XGID=---bB-DCC-B-cA---a-dabb---:2:1:1:00:4:2:1:7:10"
+CUBE_XGID = "XGID=-b----E-C---eE---c-e----B-:0:0:1:00:0:0:0:0:8"
 
 
 # Prepare only.  These calls do not start engines, parse results, cache data,

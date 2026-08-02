@@ -78,6 +78,22 @@ _CANONICAL_PLAYER_MAPPING = MappingProxyType(
         "player_o": "AnkiGammon Player.O; bottom; negative checkers",
     }
 )
+_COMPLETE_GNUID_CANONICAL_PLAYER_MAPPING = MappingProxyType(
+    {
+        "player_0": "O; AnkiGammon Player.O; stable GNU player 0",
+        "player_1": "X; AnkiGammon Player.X; stable GNU player 1",
+    }
+)
+_COMPLETE_GNUID_SOURCE_PLAYER_MAPPINGS = MappingProxyType(
+    {
+        "player_o": MappingProxyType(
+            {"AnkiGammon Player.O/negative": "player_0", "AnkiGammon Player.X/positive": "player_1"}
+        ),
+        "player_x": MappingProxyType(
+            {"AnkiGammon Player.X/positive": "player_0", "AnkiGammon Player.O/negative": "player_1"}
+        ),
+    }
+)
 
 
 class IdentifierBridgeError(ValueError):
@@ -336,6 +352,14 @@ def _canonical_position(native: AnkiPosition) -> CanonicalCheckerPosition:
     return CanonicalCheckerPosition(tuple(native.points), native.x_off, native.o_off)
 
 
+def _complete_gnuid_dice_owner(raw_identifier):
+    """Read GNU Match ID DiceOwner, which controls Position ID block ownership."""
+
+    match_id = raw_identifier.split(":", 1)[1]
+    raw_match = base64.b64decode(match_id, validate=True)
+    return "player_x" if raw_match[0] & (1 << 6) else "player_o"
+
+
 def _empty_state():
     values = {name: None for name in _STATE_FIELDS}
     availability = {name: "unavailable" for name in _STATE_FIELDS}
@@ -388,6 +412,8 @@ def _parse_position_id(raw_identifier):
 
 def _parse_complete_gnuid(raw_identifier):
     native, native_metadata = parse_gnuid(raw_identifier)
+    dice_owner = _complete_gnuid_dice_owner(raw_identifier)
+    ownership_normalized = dice_owner == "player_x"
     values, availability = _empty_state()
     values.update(
         {
@@ -422,7 +448,7 @@ def _parse_complete_gnuid(raw_identifier):
         unsupported.append("pending_double")
     if native_metadata.get("resigned"):
         unsupported.append("pending_resignation")
-    if values["game_state"] != 1:
+    if values["game_state"] not in (0, 1):
         availability["game_state"] = "unsupported"
         unsupported.append("non_playing_game_state")
     state = _state(values, availability)
@@ -434,10 +460,10 @@ def _parse_complete_gnuid(raw_identifier):
         canonical_position=_canonical_position(native),
         state=state,
         source_turn=values["on_roll"],
-        source_orientation="gnu-position-id-player-x-absolute",
-        source_player_mapping=_SOURCE_PLAYER_MAPPING,
-        canonical_player_mapping=_CANONICAL_PLAYER_MAPPING,
-        normalization_applied=False,
+        source_orientation="gnu-position-id-opponent-first-current-player-second",
+        source_player_mapping=_COMPLETE_GNUID_SOURCE_PLAYER_MAPPINGS[dice_owner],
+        canonical_player_mapping=_COMPLETE_GNUID_CANONICAL_PLAYER_MAPPING,
+        normalization_applied=ownership_normalized,
         point_reversal_applied=False,
         bar_reversal_applied=False,
         unavailable_state=state.unavailable_fields,
@@ -620,6 +646,12 @@ def to_canonical_analysis_request(
         unsupported.append("checker_requires_dice")
     if decision_type == "cube" and availability["dice"] == "available" and values["dice"] is not None:
         unsupported.append("cube_requires_pre_roll_state_without_dice")
+    if (
+        decision_type == "cube"
+        and availability["crawford"] == "available"
+        and values["crawford"] is True
+    ):
+        unsupported.append("cube_decision_illegal_during_crawford")
     return CanonicalAnalysisRequest(
         identifier=parsed,
         decision_type=decision_type,
@@ -646,23 +678,39 @@ def _native_cube_owner(value):
     }[value]
 
 
-def _correct_ankigammon_match_id(encoded_gnuid, on_roll):
-    """Set two GNU-required bits omitted by AnkiGammon 1.7.0's encoder.
+def _correct_ankigammon_match_id(encoded_gnuid, on_roll, game_state=None):
+    """Correct GNU-required state bits after AnkiGammon 1.7.0 encoding.
 
     AnkiGammon remains responsible for the complete encoding.  The isolated
-    correction sets DiceOwner (bit 6) and the canonical framing bit (bit 66),
-    the exact delta demonstrated by the focused regression test.
+    correction sets DiceOwner (bit 6) and TurnOwner (bit 11), restores a
+    represented GameState (bits 8-10), and sets the canonical framing bit
+    (bit 66).
     """
 
     position_id, match_id = encoded_gnuid.split(":", 1)
     raw = bytearray(base64.b64decode(match_id + "="))
     if on_roll == "player_x":
         raw[0] |= 1 << 6
+        raw[1] |= 1 << 3
     else:
         raw[0] &= ~(1 << 6)
+        raw[1] &= ~(1 << 3)
+    if game_state is not None:
+        if game_state not in (0, 1):
+            raise IdentifierBridgeError("only setup or playing game state can be encoded for analysis")
+        raw[1] = (raw[1] & ~0x07) | game_state
     raw[8] |= 1 << 2
     corrected = base64.b64encode(bytes(raw)).decode("ascii").rstrip("=")
     return position_id + ":" + corrected
+
+
+def _gnu_dice_owner(canonical_request):
+    """Map source players to GNU's stable Position ID player blocks."""
+
+    on_roll = canonical_request.state.on_roll
+    if canonical_request.identifier.identifier_format == IDENTIFIER_FORMAT_XGID:
+        return "player_o" if on_roll == "player_x" else "player_x"
+    return on_roll
 
 
 def _encode_engine_gnuid(canonical_request):
@@ -679,7 +727,11 @@ def _encode_engine_gnuid(canonical_request):
         match_length=state.match_length,
         crawford=crawford,
     )
-    return _correct_ankigammon_match_id(encoded, state.on_roll)
+    return _correct_ankigammon_match_id(
+        encoded,
+        _gnu_dice_owner(canonical_request),
+        state.game_state,
+    )
 
 
 def _prepare(identifier, decision_type, engine, configuration, prefer_original, explicit_state):

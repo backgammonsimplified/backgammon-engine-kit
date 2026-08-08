@@ -74,8 +74,8 @@ class BglabGnuidOracle:
         return env
 
     def _run(self, expression: str, *args: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
-        argv = [str(self.rscript), "--vanilla", "-e", expression, *args]
-        return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False, env=self._env())
+        argv = [str(self.rscript), "--vanilla", "-", *args]
+        return subprocess.run(argv, input=expression, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False, env=self._env())
 
     def _verify_package(self) -> dict[str, Any]:
         expression = r'''
@@ -131,8 +131,8 @@ if (length(xgid) != 1 || is.na(xgid) || !startsWith(xgid, "XGID=")) stop("bglab:
 cat(xgid, "\n", sep="")
 '''
         library_arg = str(self.r_library) if self.r_library is not None else ""
-        argv = [str(self.rscript), "--vanilla", "-e", expression, library_arg, position_id, match_id]
-        completed = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False, env=self._env())
+        argv = [str(self.rscript), "--vanilla", "-", library_arg, position_id, match_id]
+        completed = subprocess.run(argv, input=expression, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False, env=self._env())
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
             raise RuntimeError(f"bglab::gnuid2xgid failed for {complete_gnuid!r}: {detail}")
@@ -140,7 +140,7 @@ cat(xgid, "\n", sep="")
         if xgid is None:
             raise RuntimeError(f"bglab::gnuid2xgid emitted no complete XGID for {complete_gnuid!r}")
         result = {"input": complete_gnuid, "position_id": position_id, "match_id": match_id, "xgid": xgid,
-                  "argv": argv, "stdout": completed.stdout, "stderr": completed.stderr, "exit_code": completed.returncode,
+                  "argv": argv, "r_script": expression, "stdout": completed.stdout, "stderr": completed.stderr, "exit_code": completed.returncode,
                   "cache_hit": False, "provenance": self.provenance}
         self.cache[complete_gnuid] = result
         return result

@@ -1,11 +1,12 @@
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 3L) {
-  stop("usage: install_current_backgammonboard.R <library> <commit> <refresh:true|false>")
+if (length(args) < 4L) {
+  stop("usage: install_current_backgammonboard.R <library> <release-ref> <resolved-commit> <refresh:true|false>")
 }
 
 library_path <- normalizePath(args[[1L]], winslash = "/", mustWork = FALSE)
-expected_sha <- args[[2L]]
-refresh <- tolower(args[[3L]]) %in% c("1", "true", "yes", "y")
+requested_ref <- args[[2L]]
+expected_sha <- args[[3L]]
+refresh <- tolower(args[[4L]]) %in% c("1", "true", "yes", "y")
 dir.create(library_path, recursive = TRUE, showWarnings = FALSE)
 .libPaths(c(library_path, .libPaths()))
 
@@ -13,10 +14,6 @@ repos <- getOption("repos")
 if (is.null(repos) || identical(unname(repos[["CRAN"]]), "@CRAN@")) {
   options(repos = c(CRAN = "https://cloud.r-project.org"))
 }
-if (!requireNamespace("remotes", quietly = TRUE)) {
-  install.packages("remotes", lib = library_path)
-}
-
 remote_field <- function(d, field) {
   value <- d[[field]]
   if (is.null(value)) "" else as.character(value)
@@ -28,13 +25,19 @@ installed_source_matches <- function() {
   d <- utils::packageDescription("backgammonboard", lib.loc = library_path)
   remote_sha <- remote_field(d, "RemoteSha")
   remote_ref <- remote_field(d, "RemoteRef")
-  identical(remote_sha, expected_sha) || identical(remote_ref, expected_sha)
+  github_sha1 <- remote_field(d, "GithubSHA1")
+  github_ref <- remote_field(d, "GithubRef")
+  identical(remote_sha, expected_sha) || identical(github_sha1, expected_sha) ||
+    identical(remote_ref, requested_ref) || identical(github_ref, requested_ref)
 }
 
 if (refresh || !installed_source_matches()) {
+  if (!requireNamespace("remotes", quietly = TRUE)) {
+    install.packages("remotes", lib = library_path)
+  }
   remotes::install_github(
     "backgammonsimplified/backgammonboard",
-    ref = expected_sha,
+    ref = requested_ref,
     lib = library_path,
     dependencies = NA,
     upgrade = "never",
@@ -54,13 +57,22 @@ if (length(missing)) stop(paste("missing required public API:", paste(missing, c
 d <- utils::packageDescription("backgammonboard", lib.loc = library_path)
 remote_sha <- remote_field(d, "RemoteSha")
 remote_ref <- remote_field(d, "RemoteRef")
-if (!identical(remote_sha, expected_sha) && !identical(remote_ref, expected_sha)) {
+github_sha1 <- remote_field(d, "GithubSHA1")
+github_ref <- remote_field(d, "GithubRef")
+matches_release <- identical(remote_sha, expected_sha) ||
+  identical(github_sha1, expected_sha) || identical(remote_ref, requested_ref) ||
+  identical(github_ref, requested_ref)
+if (!matches_release) {
   stop(paste(
-    "backgammonboard source mismatch: expected", expected_sha,
-    "found RemoteSha", remote_sha, "RemoteRef", remote_ref
+    "backgammonboard source mismatch: requested", requested_ref,
+    "resolved", expected_sha, "found RemoteSha", remote_sha,
+    "RemoteRef", remote_ref, "GithubSHA1", github_sha1,
+    "GithubRef", github_ref
   ))
 }
 cat("backgammonboard package: ", d$Package, " ", d$Version, "\n", sep = "")
+cat("backgammonboard requested release ref: ", requested_ref, "\n", sep = "")
+cat("backgammonboard resolved release commit: ", expected_sha, "\n", sep = "")
 cat("backgammonboard RemoteSha: ", remote_sha, "\n", sep = "")
 cat("backgammonboard RemoteRef: ", remote_ref, "\n", sep = "")
 cat("backgammonboard installed path: ", system.file(package = "backgammonboard", lib.loc = library_path), "\n", sep = "")

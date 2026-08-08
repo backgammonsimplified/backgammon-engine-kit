@@ -109,6 +109,53 @@ def canonical_compare(
     )
 
 
+def canonical_triplet(
+    source: dict[str, Any] | None,
+    converted: dict[str, Any] | None,
+    roundtrip: dict[str, Any] | None,
+) -> str:
+    if not all(isinstance(value, dict) for value in (source, converted, roundtrip)):
+        return (
+            '<section class="canonical-card reference-canonical"><h5>'
+            "Calculator canonical source / converted / round-trip comparison</h5>"
+            '<p class="error-text">Calculator canonical comparison unavailable.</p></section>'
+        )
+    values = [source, converted, roundtrip]
+    flattened = [_flatten(value) for value in values]
+    paths = sorted(set().union(*(set(value) for value in flattened)))
+    differences = [
+        path
+        for path in paths
+        if len({json.dumps(value.get(path), sort_keys=True) for value in flattened}) > 1
+    ]
+    hard_differences = [path for path in differences if path != "rules.maximum_cube"]
+    if not differences:
+        classification = "exact agreement"
+    elif not hard_differences:
+        classification = "representational/default/normalization difference"
+    else:
+        classification = "factual state mismatch"
+    rows = []
+    for path in paths:
+        cells = []
+        for value in flattened:
+            css = " diff" if path in differences else ""
+            cells.append(
+                f'<div class="json-cell{css}"><pre>{e(json.dumps(path))}: '
+                f'{e(json.dumps(value.get(path), ensure_ascii=False))}</pre></div>'
+            )
+        rows.append(f'<div class="json-row triplet">{"".join(cells)}</div>')
+    return (
+        '<section class="canonical-card reference-canonical">'
+        '<h5>Calculator canonical source / converted / round-trip factual comparison</h5>'
+        f'<div class="comparison-line">Classification: <strong>{e(classification)}</strong></div>'
+        '<details open><summary>Field-level Calculator canonical state</summary>'
+        '<div class="json-compare"><div class="json-head triplet">'
+        '<div>Source</div><div>Converted</div><div>Round trip</div></div>'
+        f'{"".join(rows)}</div></details></section>'
+    )
+
+
 def diff_table(rows: list[dict[str, Any]], title: str) -> str:
     if not rows:
         return (
@@ -191,25 +238,44 @@ def reference_card(
     middle: str,
     terminal: str,
     visuals: dict[str, Any],
-    bglab_output: str | None = None,
-    gnu_post_import: str | None = None,
+    bglab_record: dict[str, Any] | None = None,
+    gnu_post_import: dict[str, Any] | None = None,
+    board_consumer_parity: dict[str, Any] | None = None,
 ) -> str:
     diagnostics = []
     if gnu_post_import:
         diagnostics.append(
-            f'<p><strong>GNU post-import diagnostic:</strong> <code>{e(gnu_post_import)}</code></p>'
+            '<details><summary>GNU post-import diagnostic from source XGID</summary>'
+            f'<p><strong>GNU result:</strong> <code>{e(gnu_post_import.get("complete_gnuid"))}</code></p>'
+            f'<pre>{e(json.dumps(gnu_post_import, indent=2, ensure_ascii=False))}</pre></details>'
         )
-    if bglab_output:
+    if bglab_record:
         diagnostics.append(
-            f'<p><strong>Diagnostic: R bglab:</strong> <code>{e(bglab_output)}</code></p>'
+            '<details><summary>Diagnostic only: R bglab (not canonical)</summary>'
+            f'<pre>{e(json.dumps(bglab_record, indent=2, ensure_ascii=False))}</pre></details>'
         )
+    parity = board_consumer_parity or {}
+    parity_html = (
+        '<section class="board-parity"><h5>Board direct-complete-GNUID consumer parity</h5>'
+        f'<span class="badge">{e(parity.get("classification", "unsupported/unavailable"))}</span>'
+        '<p>Path A: complete GNUID → Calculator XGID → Board. '
+        'Path B: the same complete GNUID → Board directly. Board is a consumer, not the conversion authority.</p>'
+        '<details><summary>Board consumer factual states and differences</summary>'
+        f'<pre>{e(json.dumps(parity, indent=2, ensure_ascii=False))}</pre></details></section>'
+    )
+    canonical = canonical_triplet(
+        visuals.get("calculator_source_canonical"),
+        visuals.get("calculator_middle_canonical"),
+        visuals.get("calculator_terminal_canonical"),
+    )
     return (
         '<article class="reference-card"><h4>Reference: backgammoncalculator 0.2.0</h4>'
         f'<p>{e(direction)}</p><div class="reference-lane">'
         f'{visual(source, visuals["source_render"], visuals["source_gnu"], "Source")}'
         f'{visual(middle, visuals["middle_render"], visuals["middle_gnu"], "Converted reference")}'
         f'{visual(terminal, visuals["terminal_render"], visuals["terminal_gnu"], "Reference round trip")}'
-        f'</div>{"".join(diagnostics)}</article>'
+        f'</div>{canonical}{parity_html}<div class="diagnostics"><h5>Secondary diagnostics</h5>'
+        f'{"".join(diagnostics)}</div></article>'
     )
 
 
@@ -261,6 +327,7 @@ details { margin-top: 8px; border: 1px solid #d7dee6; border-radius: 7px; overfl
 summary { cursor: pointer; font-weight: 700; padding: 8px 10px; background: #f8f9fa; }
 .json-compare { border-top: 1px solid #d7dee6; background: #d7dee6; max-height: 390px; overflow: auto; }
 .json-head, .json-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1px; }
+.json-head.triplet, .json-row.triplet { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .json-head > div { background: #dfe7ef; padding: 9px 11px; font-weight: 700; position: sticky; top: 0; z-index: 1; }
 .json-cell { min-width: 0; background: #101820; color: #e8f1f8; padding: 6px 8px; }
 .json-cell pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font: 11px/1.4 Consolas, "Courier New", monospace; }
@@ -271,6 +338,8 @@ summary { cursor: pointer; font-weight: 700; padding: 8px 10px; background: #f8f
 .pass-text { color: var(--green); padding: 0 8px; }
 .error-text { color: var(--red); }
 .fail-card { background: var(--red-bg); }
+.board-parity { margin: 12px 0; padding: 10px; border: 1px solid var(--bs-tan); border-radius: 7px; background: #fff; }
+.diagnostics > h5 { margin-bottom: 4px; }
 @media (max-width: 1500px) { .methods { grid-template-columns: repeat(3, minmax(330px, 1fr)); overflow-x: auto; } }
 @media (max-width: 900px) { .reference-lane { grid-template-columns: 1fr; } }
 '''
@@ -281,12 +350,15 @@ def render_page(case_sections: list[str], provenance: dict[str, Any]) -> str:
     renderer = provenance.get("renderer", {})
     board_sha = e(renderer.get("resolved_commit") or renderer.get("expected_commit"))
     board_version = e(renderer.get("package_version"))
-    calc_sha = e(provenance.get("calculator", {}).get("release_commit"))
+    board_ref = e(renderer.get("requested_release_ref"))
+    calculator = provenance.get("calculator", {})
+    calc_sha = e(calculator.get("resolved_release_commit") or calculator.get("release_commit"))
+    calc_ref = e(calculator.get("requested_release_ref"))
     return f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Oracle-first XGID and GNUID comparison</title><style>{CSS}</style></head><body>
 <header class="top"><h1>Oracle-first XGID ↔ GNUID verification</h1>
-<p>Three method columns: Native Python, Engine Kit public API, and Direct AnkiGammon. In each method column, GNU CLI rendering is on top, the current BS backgammonboard rendering is underneath, and the canonical representation follows. Stable players are never swapped for appearance.</p></header>
-<div class="provenance"><strong>backgammonboard:</strong> {board_version} at {board_sha}, BS colors/style · <strong>Calculator:</strong> {calc_sha}</div>
+<p>Three method columns: Engine Kit native, Engine Kit public API / bridge, and Direct AnkiGammon. In each method column, real GNU CLI evidence is on top, backgammonboard v0.1.1 BS rendering is underneath, and factual canonical representation follows. Stable players are never swapped for appearance.</p></header>
+<div class="provenance"><strong>backgammonboard:</strong> requested {board_ref}, resolved {board_sha}, package {board_version}, BS colors/style · <strong>Calculator:</strong> requested {calc_ref}, resolved {calc_sha}</div>
 <main data-layout="three-method-columns">{''.join(case_sections)}
 <section class="case"><h2>Provenance</h2><pre>{p}</pre></section></main></body></html>'''

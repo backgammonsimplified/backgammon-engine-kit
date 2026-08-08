@@ -4,6 +4,15 @@ from dataclasses import dataclass
 from typing import Any
 
 
+RESULT_CLASSIFICATIONS = (
+    "exact agreement",
+    "representational/default/normalization difference",
+    "factual state mismatch",
+    "unsupported/unavailable",
+    "error",
+)
+
+
 @dataclass(frozen=True)
 class IdentifierConversion:
     xgid: str | None

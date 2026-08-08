@@ -8,9 +8,14 @@ CASES="$RESEARCH_DIR/fixtures/cases.csv"
 OUTPUT="${ORACLE_GALLERY_OUTPUT:-$ENGINE_KIT_REPO/artifacts/oracle-identifier-comparison}"
 BGLAB_LIBRARY="${BGLAB_R_LIBRARY:-$RESEARCH_DIR/.r-library}"
 BOARD_LIBRARY="${BACKGAMMONBOARD_R_LIBRARY:-$RESEARCH_DIR/.renderer-library}"
+CALCULATOR_REF="v0.2.0"
+CALCULATOR_COMMIT="a385a963ed01a6eac083dae7a1b246b1c150b3eb"
+BOARD_REF="v0.1.1"
 BOARD_COMMIT="0bc70d30e458642f41d4976948e49492c2c6117c"
+CASE_ID="${ORACLE_GALLERY_CASE_ID:-checker-4-2}"
 BGLAB_REFRESH="${BGLAB_REFRESH:-0}"
 BOARD_REFRESH="${BACKGAMMONBOARD_REFRESH:-0}"
+CALCULATOR_REFRESH="${BACKGAMMONCALCULATOR_REFRESH:-0}"
 
 if [[ -x "$ENGINE_KIT_REPO/.venv-native-codec/Scripts/python.exe" ]]; then PYTHON="$ENGINE_KIT_REPO/.venv-native-codec/Scripts/python.exe";
 elif [[ -x "$ENGINE_KIT_REPO/.venv/Scripts/python.exe" ]]; then PYTHON="$ENGINE_KIT_REPO/.venv/Scripts/python.exe";
@@ -22,13 +27,14 @@ BGLAB_LIBRARY_NATIVE="$(native_path "$BGLAB_LIBRARY")"; BOARD_LIBRARY_NATIVE="$(
 mkdir -p "$BGLAB_LIBRARY" "$BOARD_LIBRARY"
 export PYTHONPATH="$RESEARCH_DIR/src:$ENGINE_SRC${PYTHONPATH:+:$PYTHONPATH}"
 export BGLAB_R_LIBRARY="$BGLAB_LIBRARY_NATIVE" BACKGAMMONBOARD_R_LIBRARY="$BOARD_LIBRARY_NATIVE"
+export BACKGAMMONCALCULATOR_R_LIBRARY="$BGLAB_LIBRARY_NATIVE"
 
 printf '\n[1/6] Engine Kit / AnkiGammon preflight\n'
 "$PYTHON" -c "import ankigammon, backgammon_engine_kit as bek; print('AnkiGammon: OK'); print('Engine Kit:', bek.__file__)"
 printf '\n[2/6] Calculator 0.2.0 reference preflight\n'
-"$RSCRIPT" --vanilla -e "if(!requireNamespace('backgammoncalculator',quietly=TRUE)) stop('backgammoncalculator is not installed'); d<-utils::packageDescription('backgammoncalculator'); v<-as.character(utils::packageVersion('backgammoncalculator')); if(v!='0.2.0') stop(paste('expected backgammoncalculator 0.2.0, found',v)); sha<-ifelse(is.null(d\$RemoteSha),'',d\$RemoteSha); if(sha!='a385a963ed01a6eac083dae7a1b246b1c150b3eb') stop(paste('unexpected Calculator RemoteSha',sha)); cat('backgammoncalculator: ',v,' RemoteSha=',sha,'\n',sep='')"
-printf '\n[3/6] Current BS backgammonboard renderer preflight\n'
-"$RSCRIPT" --vanilla "$RESEARCH_DIR/scripts/install_current_backgammonboard.R" "$BOARD_LIBRARY_NATIVE" "$BOARD_COMMIT" "$BOARD_REFRESH"
+"$RSCRIPT" --vanilla "$RESEARCH_DIR/scripts/install_released_backgammoncalculator.R" "$BGLAB_LIBRARY_NATIVE" "$CALCULATOR_REF" "$CALCULATOR_COMMIT" "$CALCULATOR_REFRESH"
+printf '\n[3/6] Released BS backgammonboard renderer preflight\n'
+"$RSCRIPT" --vanilla "$RESEARCH_DIR/scripts/install_current_backgammonboard.R" "$BOARD_LIBRARY_NATIVE" "$BOARD_REF" "$BOARD_COMMIT" "$BOARD_REFRESH"
 printf '\n[4/6] Current bglab diagnostic preflight\n'
 "$RSCRIPT" --vanilla "$RESEARCH_DIR/scripts/install_current_bglab.R" "$BGLAB_LIBRARY_NATIVE" "$BGLAB_REFRESH"
 "$PYTHON" - <<'PY'
@@ -37,10 +43,10 @@ c=GnuBackgammonCli();print('GNU CLI:',c.executable);print('GNU CLI command contr
 PY
 printf '\n[5/6] Research gallery tests\n'
 "$PYTHON" -m unittest discover -s "$RESEARCH_DIR/tests" -p 'test_*.py' -v
-printf '\n[6/6] Build full oracle-first reconciliation gallery\n'
+printf '\n[6/6] Build focused oracle-first reconciliation gallery (%s)\n' "$CASE_ID"
 rm -rf "$OUTPUT"; mkdir -p "$OUTPUT"
-"$PYTHON" -m backgammon_research.oracle_gallery --cases "$CASES" --output "$OUTPUT" --r-library "$BGLAB_LIBRARY_NATIVE"
-printf '\nFull oracle-first reconciliation gallery:\n%s\n' "$OUTPUT/oracle-gallery.html"
+"$PYTHON" -m backgammon_research.oracle_gallery --cases "$CASES" --case-id "$CASE_ID" --output "$OUTPUT" --r-library "$BGLAB_LIBRARY_NATIVE"
+printf '\nFocused oracle-first reconciliation gallery:\n%s\n' "$OUTPUT/oracle-gallery.html"
 printf 'Machine-readable report:\n%s\n' "$OUTPUT/oracle-comparison-results.json"
 printf 'Method comparisons:\n%s\n' "$OUTPUT/method-comparisons.csv"
 printf 'Round trips:\n%s\n' "$OUTPUT/roundtrips.csv"

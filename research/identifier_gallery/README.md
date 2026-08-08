@@ -49,6 +49,42 @@ The Python entry point retains an unfiltered mode for later full-matrix work, bu
 
 Generated local libraries and artifacts are not committed.
 
+## External held-out batch validation
+
+The external runner accepts any CSV with `gnuid` and `xgid` columns. Additional
+source columns are left untouched and are used for summary dimensions when
+available. The supplied pair is diagnosed separately; each original identifier
+is then tested independently in both directions through released Calculator
+v0.2.0, Engine Kit native conversion, the public bridge, and Direct AnkiGammon.
+
+From Git Bash at the repository root:
+
+```bash
+bash research/identifier_gallery/scripts/run_external_batch.sh /path/to/my-identifiers.csv
+```
+
+Calculator work is performed by one Rscript batch process, which emits immutable
+release provenance and canonical factual states. Python streams that reference
+file and writes one detail record per input row, direction, and surface. A
+20,000-row input therefore normally produces 160,000 rows in
+`roundtrip-results.csv`. Progress is printed every 1,000 rows by default; set
+`EXTERNAL_BATCH_PROGRESS_INTERVAL` to change the interval.
+
+Every run writes beneath `artifacts/external-identifier-batch-<timestamp>/`, then
+the launcher automatically refreshes `SHA256SUMS.txt`, creates a ZIP and matching
+`.sha256` file beneath `~/Documents/scratch/`, prints all paths and the ZIP hash,
+opens that scratch directory in Explorer, and returns the original validation
+status. Generated evidence remains untracked. GNU CLI, backgammonboard, board
+rendering, and the full HTML oracle gallery are intentionally excluded from this
+per-row path.
+
+Hard failures are Calculator reference errors, Engine Kit native/public factual
+mismatches, genuine Engine Kit native/public errors, and completed Engine Kit
+native/public round trips that factually mismatch their own source. Explicit
+public bridge `unsupported`/`unavailable` outcomes, source-pair disagreements,
+normalization-only differences, and Direct AnkiGammon disagreements remain
+visible evidence but do not by themselves make the validation exit nonzero.
+
 ## Outputs
 
 ```text

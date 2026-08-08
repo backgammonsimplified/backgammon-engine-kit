@@ -17,13 +17,21 @@ if (!requireNamespace("remotes", quietly = TRUE)) {
   install.packages("remotes", lib = library_path)
 }
 
-installed_sha <- ""
-if (requireNamespace("backgammonboard", quietly = TRUE)) {
-  d <- utils::packageDescription("backgammonboard")
-  installed_sha <- ifelse(is.null(d$RemoteSha), "", as.character(d$RemoteSha))
+remote_field <- function(d, field) {
+  value <- d[[field]]
+  if (is.null(value)) "" else as.character(value)
 }
 
-if (refresh || !identical(installed_sha, expected_sha)) {
+installed_source_matches <- function() {
+  description_path <- file.path(library_path, "backgammonboard", "DESCRIPTION")
+  if (!file.exists(description_path)) return(FALSE)
+  d <- utils::packageDescription("backgammonboard", lib.loc = library_path)
+  remote_sha <- remote_field(d, "RemoteSha")
+  remote_ref <- remote_field(d, "RemoteRef")
+  identical(remote_sha, expected_sha) || identical(remote_ref, expected_sha)
+}
+
+if (refresh || !installed_source_matches()) {
   remotes::install_github(
     "backgammonsimplified/backgammonboard",
     ref = expected_sha,
@@ -36,17 +44,23 @@ if (refresh || !identical(installed_sha, expected_sha)) {
   )
 }
 
-if (!requireNamespace("backgammonboard", quietly = TRUE)) {
-  stop("backgammonboard installation did not become available")
+if (!file.exists(file.path(library_path, "backgammonboard", "DESCRIPTION"))) {
+  stop("backgammonboard installation did not become available in the target library")
 }
-required <- c("ggboard", "validate_xgid")
+required <- c("ggboard", "validate_xgid", "board_colors", "board_style")
 missing <- setdiff(required, getNamespaceExports("backgammonboard"))
-if (length(missing)) stop(paste("missing required public API:", paste(missing, collapse=", ")))
-d <- utils::packageDescription("backgammonboard")
-remote_sha <- ifelse(is.null(d$RemoteSha), "", as.character(d$RemoteSha))
-if (!identical(remote_sha, expected_sha)) {
-  stop(paste("backgammonboard RemoteSha mismatch: expected", expected_sha, "found", remote_sha))
+if (length(missing)) stop(paste("missing required public API:", paste(missing, collapse = ", ")))
+
+d <- utils::packageDescription("backgammonboard", lib.loc = library_path)
+remote_sha <- remote_field(d, "RemoteSha")
+remote_ref <- remote_field(d, "RemoteRef")
+if (!identical(remote_sha, expected_sha) && !identical(remote_ref, expected_sha)) {
+  stop(paste(
+    "backgammonboard source mismatch: expected", expected_sha,
+    "found RemoteSha", remote_sha, "RemoteRef", remote_ref
+  ))
 }
 cat("backgammonboard package: ", d$Package, " ", d$Version, "\n", sep = "")
 cat("backgammonboard RemoteSha: ", remote_sha, "\n", sep = "")
-cat("backgammonboard installed path: ", system.file(package = "backgammonboard"), "\n", sep = "")
+cat("backgammonboard RemoteRef: ", remote_ref, "\n", sep = "")
+cat("backgammonboard installed path: ", system.file(package = "backgammonboard", lib.loc = library_path), "\n", sep = "")

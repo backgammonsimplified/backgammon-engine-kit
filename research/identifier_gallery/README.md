@@ -1,27 +1,37 @@
 # Stable-player identifier reconciliation gallery
 
-This research package produces the full oracle-first XGID/GNUID reconciliation gallery discussed for Engine Kit.
+This research package produces the oracle-first XGID/GNUID reconciliation gallery discussed for Engine Kit.
 
 For every retained edge case it shows both directions:
 
 - **XGID → GNUID → XGID**
 - **GNUID → XGID → GNUID**
 
-The highlighted reference is released `backgammoncalculator` **0.2.0**. Alongside it, each direction is independently exercised through:
+The highlighted reference is `backgammoncalculator` **0.2.0**. Alongside it, each direction is independently exercised through three method columns:
 
 1. **Native Python** identifier conversion in Engine Kit.
 2. **Engine Kit public API / request bridge**.
 3. **Direct AnkiGammon** conversion.
 
-GNU Backgammon CLI is retained as a post-import / board-state diagnostic, not the canonical conversion oracle. Current `bglab::gnuid2xgid()` is a secondary GNUID → XGID diagnostic. Stable players are never swapped merely to make identifiers compare equal.
+GNU Backgammon CLI is retained as a post-import and board-state diagnostic. Current `bglab::gnuid2xgid()` is a secondary GNUID → XGID diagnostic. Stable players are never swapped merely to make identifiers or pictures compare equal.
 
-## Visual evidence
+## Visual evidence contract
 
-Every available XGID endpoint is rendered with `backgammonboard` from the exact GitHub source commit pinned by the launcher. The renderer lives in a dedicated gallery R library so an older installed package with the same `0.1.0` version cannot be selected accidentally. Renderer provenance records the exact `RemoteSha`.
+The three method columns intentionally preserve the earlier useful gallery structure. Within each method column:
 
-GNUID states are rendered through GNU CLI text-board evidence. Canonical Engine Kit state is shown with factual and metadata diffs so identifier equality is not used as a substitute for semantic comparison.
+1. GNUID evidence is rendered by the real GNU CLI at the top.
+2. XGID evidence is rendered by `backgammonboard` underneath.
+3. The canonical Engine Kit representation and field-level comparison follow underneath the two boards.
 
-## Run
+The current renderer target is `backgammonboard` master commit `0bc70d30e458642f41d4976948e49492c2c6117c`, package version `0.1.1`. Gallery Board renders explicitly use `board_colors("bs")`, `board_style("bs")`, `player_name_style="checker"`, and the stable `player_1` display perspective. That perspective is presentation only and does not change canonical player identity.
+
+The renderer lives in a dedicated gallery R library. Provenance accepts the immutable requested full commit from either DESCRIPTION `RemoteSha` or `RemoteRef`, because `remotes::install_github()` does not reliably populate `RemoteSha` for every archive installation.
+
+## Focused checker run
+
+During parity recovery, do not start with the full fixture matrix. The task-management runner extracts only `checker-4-2` and sends that one fixture through this same gallery code and visual layout.
+
+## Full run
 
 From Git Bash at the Engine Kit repository root:
 
@@ -29,7 +39,7 @@ From Git Bash at the Engine Kit repository root:
 bash research/identifier_gallery/scripts/run_oracle_gallery.sh
 ```
 
-The launcher verifies Calculator 0.2.0 and its release commit, installs the pinned current `backgammonboard` source into `.renderer-library`, refreshes/uses current bglab in `.r-library`, checks GNU CLI, runs the full research unit suite, builds the gallery, and opens the resulting HTML on Windows.
+The launcher verifies Calculator 0.2.0 and its release commit, installs the pinned current `backgammonboard` source into `.renderer-library`, refreshes or uses current bglab in `.r-library`, checks GNU CLI, runs the research unit suite, builds the gallery, and opens the resulting HTML on Windows.
 
 Generated local libraries and artifacts are not committed.
 

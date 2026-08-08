@@ -1,0 +1,13 @@
+case_id,label,xgid,gnuid
+known-top-roller,"Top roller, max-cube loss",XGID=-BDB-------------a------e-:1:-1:-1:42:0:0:0:5:8,ewMAAD4gAAAAAA:AQGqAAAAAAAE
+orientation-bottom,"Bottom player on roll",XGID=-A-B--A---------------d---:0:0:1:00:0:0:0:0:10,PAAAICMAAAAAAA:cAkAAAAAAAAE
+orientation-top,"Top player on roll",XGID=---D---------------a--b-a-:0:0:-1:00:0:0:0:0:8,PAAAICMAAAAAAA:MAEAAAAAAAAE
+checker-4-2,"Checker decision with 4-2",XGID=-a-a--E-C---dE---d-e----B-:0:0:1:42:0:0:0:0:8,4PPgASTgc/ABMA:cAkKAAAAAAAE
+cube-centered,"Centered cube",XGID=---bB-DCC-B-cA---a-dabb---:0:0:1:00:0:0:0:0:8,bD3BAQyYd2cEAA:cAkAAAAAAAAE
+one-bar,"One checker on bar",XGID=-b----E-C---eE---c-e----AA:0:0:1:00:0:0:0:0:10,4HPwATDgc/ABUA:cAkAAAAAAAAE
+both-bars-off,"Bars and borne-off checkers",XGID=a------------------------B:0:0:1:00:0:0:0:0:10,AAAAAQAADAAAAA:cAkAAAAAAAAE
+cube-owner-player-1,"Cube owned by player 1",XGID=-b----E-C---eE---c-e----B-:1:1:1:00:0:0:0:0:10,4HPwATDgc/ABMA:UQkAAAAAAAAE
+cube-owner-player-0,"Cube owned by player 0",XGID=-b----E-C---eE---c-e----B-:1:-1:1:00:0:0:0:0:10,4HPwATDgc/ABMA:QQkAAAAAAAAE
+asymmetric-match,"Asymmetric 7-point match score",XGID=-b----E-C---eE---c-e----B-:0:0:1:00:2:4:0:7:10,4HPwATDgc/ABMA:cAngAEAAEAAE
+crawford,"Crawford match state",XGID=-b----E-C---eE---c-e----B-:0:0:1:00:2:6:1:7:10,4HPwATDgc/ABMA:8AngAGAAEAAE
+post-crawford,"Post-Crawford top player",XGID=-b----E-C---eE---c-e----B-:0:0:-1:00:2:6:0:7:8,4HPwATDgc/ABMA:MAHgAGAAEAAE

@@ -1,0 +1,5 @@
+.venv/
+.r-library/
+.renderer-library/
+__pycache__/
+*.pyc

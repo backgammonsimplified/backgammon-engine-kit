@@ -17,8 +17,8 @@ def test_package_version_matches_distribution_metadata():
     assert backgammon_engine_kit.__version__ == _metadata_value("version")
 
 
-def test_declared_python_floor_is_preserved():
-    assert _metadata_value("python_requires") == ">=3.7"
+def test_declared_python_floor_matches_ankigammon_dependency():
+    assert _metadata_value("python_requires") == ">=3.8"
 
 
 def test_package_schema_resources_are_package_relative():

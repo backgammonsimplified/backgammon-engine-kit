@@ -16,6 +16,21 @@ from .hashing import (
     view_hash,
     view_json,
 )
+from .native_codec import (
+    NativeConversionResult,
+    NativeIdentifierCodecError,
+    NormalizationChange,
+    convert_gnuid_to_xgid,
+    convert_xgid_to_gnuid,
+    gnuid_from_position,
+    gnuid_to_xgid,
+    match_id_from_position,
+    position_from_gnuid,
+    position_from_xgid,
+    position_id_from_position,
+    xgid_from_position,
+    xgid_to_gnuid,
+)
 from .models import (
     BackgammonView,
     Board,
@@ -55,6 +70,19 @@ from .validation import (
 )
 
 __all__ = [
+    "NativeConversionResult",
+    "NativeIdentifierCodecError",
+    "NormalizationChange",
+    "convert_gnuid_to_xgid",
+    "convert_xgid_to_gnuid",
+    "gnuid_from_position",
+    "gnuid_to_xgid",
+    "match_id_from_position",
+    "position_from_gnuid",
+    "position_from_xgid",
+    "position_id_from_position",
+    "xgid_from_position",
+    "xgid_to_gnuid",
     "BGSageConversionError",
     "BGSagePosition",
     "BackgammonView",

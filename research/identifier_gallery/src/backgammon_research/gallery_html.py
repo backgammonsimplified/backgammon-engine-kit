@@ -1,5 +1,7 @@
 from __future__ import annotations
-import html, json
+
+import html
+import json
 from typing import Any
 
 
@@ -7,64 +9,284 @@ def e(value: Any) -> str:
     return html.escape("" if value is None else str(value))
 
 
-def visual(identifier: str, renderer_record: dict[str, Any] | None, gnu_record: dict[str, Any] | None, label: str) -> str:
-    if identifier.startswith("XGID="):
-        if renderer_record and renderer_record.get("output"):
-            body = f'<div class="svg">{renderer_record["output"]}</div>'
-        else:
-            body = f'<pre>{e((renderer_record or {}).get("stderr") or "Renderer unavailable")}</pre>'
+def _flatten(value: Any, prefix: str = "") -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {prefix: value}
+    out: dict[str, Any] = {}
+    for key, child in value.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        out.update(_flatten(child, path))
+    return out
+
+
+def board_visual(
+    identifier: str,
+    renderer_record: dict[str, Any] | None,
+    label: str,
+) -> str:
+    if not identifier or not identifier.startswith("XGID="):
+        return (
+            f'<section class="board-card unavailable"><h5>{e(label)}</h5>'
+            '<p>Expected an XGID for backgammonboard rendering.</p></section>'
+        )
+    if renderer_record and renderer_record.get("output"):
+        body = f'<div class="svg-wrap">{renderer_record["output"]}</div>'
     else:
-        body = f'<pre class="gnu-board">{e((gnu_record or {}).get("board") or "GNU CLI board unavailable")}</pre>'
-    return f'<div class="endpoint"><h5>{e(label)}</h5><code>{e(identifier)}</code>{body}</div>'
+        body = f'<pre>{e((renderer_record or {}).get("stderr") or "Renderer unavailable")}</pre>'
+    return (
+        f'<section class="board-card"><h5>{e(label)}</h5>'
+        f'<code class="identifier">{e(identifier)}</code>{body}</section>'
+    )
+
+
+def gnu_visual(
+    identifier: str,
+    gnu_record: dict[str, Any] | None,
+    label: str,
+) -> str:
+    if not identifier or identifier.startswith("XGID="):
+        return (
+            f'<section class="board-card unavailable"><h5>{e(label)}</h5>'
+            '<p>Expected a GNUID for GNU CLI rendering.</p></section>'
+        )
+    board = (gnu_record or {}).get("board") or "GNU CLI board unavailable"
+    return (
+        f'<section class="board-card cli"><h5>{e(label)}</h5>'
+        f'<code class="identifier">{e(identifier)}</code>'
+        f'<pre>{e(board)}</pre></section>'
+    )
+
+
+def visual(
+    identifier: str,
+    renderer_record: dict[str, Any] | None,
+    gnu_record: dict[str, Any] | None,
+    label: str,
+) -> str:
+    if identifier.startswith("XGID="):
+        return board_visual(identifier, renderer_record, label)
+    return gnu_visual(identifier, gnu_record, label)
+
+
+def canonical_compare(
+    left: dict[str, Any] | None,
+    right: dict[str, Any] | None,
+    left_label: str,
+    right_label: str,
+    title: str,
+    *,
+    open_by_default: bool = True,
+) -> str:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return (
+            f'<section class="canonical-card"><h5>{e(title)}</h5>'
+            '<p class="error-text">Canonical comparison unavailable.</p></section>'
+        )
+    left_flat = _flatten(left)
+    right_flat = _flatten(right)
+    paths = sorted(set(left_flat) | set(right_flat))
+    differences = sum(left_flat.get(path) != right_flat.get(path) for path in paths)
+    status = "exact" if differences == 0 else f"{differences} difference(s)"
+    rows = []
+    for path in paths:
+        left_value = left_flat.get(path)
+        right_value = right_flat.get(path)
+        diff_class = " diff" if left_value != right_value else ""
+        rows.append(
+            '<div class="json-row">'
+            f'<div class="json-cell{diff_class}"><pre>{e(json.dumps(path))}: {e(json.dumps(left_value, ensure_ascii=False))}</pre></div>'
+            f'<div class="json-cell{diff_class}"><pre>{e(json.dumps(path))}: {e(json.dumps(right_value, ensure_ascii=False))}</pre></div>'
+            '</div>'
+        )
+    open_attr = " open" if open_by_default else ""
+    return (
+        f'<section class="canonical-card"><h5>{e(title)}</h5>'
+        f'<div class="comparison-line">Canonical comparison: <strong>{e(status)}</strong></div>'
+        f'<details{open_attr}><summary>Canonical representation</summary>'
+        '<div class="json-compare">'
+        f'<div class="json-head"><div>{e(left_label)}</div><div>{e(right_label)}</div></div>'
+        f'{"".join(rows)}</div></details></section>'
+    )
 
 
 def diff_table(rows: list[dict[str, Any]], title: str) -> str:
     if not rows:
-        return f'<details><summary>{e(title)}: no differences</summary><p class="pass-text">Canonical states align.</p></details>'
-    body = ''.join(
-        f'<tr><td><code>{e(r["path"])}</code></td><td>{e(json.dumps(r["left"], ensure_ascii=False))}</td><td class="diff">{e(json.dumps(r["right"], ensure_ascii=False))}</td></tr>'
+        return (
+            f'<details><summary>{e(title)}: no differences</summary>'
+            '<p class="pass-text">Canonical states align.</p></details>'
+        )
+    body = "".join(
+        f'<tr><td><code>{e(r["path"])}</code></td>'
+        f'<td>{e(json.dumps(r["left"], ensure_ascii=False))}</td>'
+        f'<td class="diff">{e(json.dumps(r["right"], ensure_ascii=False))}</td></tr>'
         for r in rows
     )
-    return f'<details><summary>{e(title)}: {len(rows)} difference(s)</summary><table class="diff-table"><tr><th>Path</th><th>Reference/source</th><th>Method/result</th></tr>{body}</table></details>'
+    return (
+        f'<details><summary>{e(title)}: {len(rows)} difference(s)</summary>'
+        '<table class="diff-table"><tr><th>Path</th><th>Source</th><th>Round trip</th></tr>'
+        f'{body}</table></details>'
+    )
 
 
 def method_card(attempt: dict[str, Any], visuals: dict[str, Any]) -> str:
-    cls = "pass" if attempt["reference_exact"] else ("warn" if attempt["reference_semantic"] else "fail")
-    rt = "pass" if attempt["roundtrip_exact"] else ("warn" if attempt["roundtrip_semantic"] else "fail")
-    rt_label = "exact" if attempt["roundtrip_exact"] else ("semantic" if attempt["roundtrip_semantic"] else "changed")
-    badges = f'<span class="badge {cls}">{e(attempt["classification"])}</span><span class="badge {rt}">round trip: {rt_label}</span>'
+    cls = "exact" if attempt["reference_exact"] else (
+        "semantic_exact" if attempt["reference_semantic"] else "state_mismatch"
+    )
+    rt = "exact" if attempt["roundtrip_exact"] else (
+        "semantic_exact" if attempt["roundtrip_semantic"] else "state_mismatch"
+    )
+    rt_label = "exact" if attempt["roundtrip_exact"] else (
+        "semantic" if attempt["roundtrip_semantic"] else "changed"
+    )
+    badges = (
+        f'<span class="badge {cls}">{e(attempt["classification"])}</span>'
+        f'<span class="badge {rt}">round trip: {rt_label}</span>'
+    )
     if attempt["status"] != "ok":
-        return f'<article class="method fail-card"><h4>{e(attempt["label"])}</h4>{badges}<pre>{e(attempt["error"])}</pre></article>'
+        return (
+            f'<article class="method-card fail-card"><h4>{e(attempt["label"])}</h4>'
+            f'<div class="status-row">{badges}</div><pre>{e(attempt["error"])}</pre></article>'
+        )
+
+    xgid_to_gnuid = attempt["direction"].startswith("XGID")
+    if xgid_to_gnuid:
+        gnu_id = attempt["middle"]
+        gnu_record = visuals["middle_gnu"]
+        gnu_label = "GNU CLI render of method GNUID"
+        board_id = attempt["terminal"]
+        board_record = visuals["terminal_render"]
+        board_label = "backgammonboard round-trip XGID"
+    else:
+        gnu_id = attempt["terminal"]
+        gnu_record = visuals["terminal_gnu"]
+        gnu_label = "GNU CLI round-trip GNUID"
+        board_id = attempt["middle"]
+        board_record = visuals["middle_render"]
+        board_label = "backgammonboard method XGID"
+
+    canonical = canonical_compare(
+        visuals.get("reference_middle_canonical"),
+        visuals.get("middle_canonical"),
+        "Calculator reference",
+        attempt["label"],
+        "Canonical representation",
+        open_by_default=True,
+    )
+    roundtrip = diff_table(
+        attempt["roundtrip_diff_from_source"],
+        "Round-trip canonical state vs source",
+    )
     return (
-        f'<article class="method"><h4>{e(attempt["label"])}</h4><div class="badges">{badges}</div>'
-        f'<div class="lane">{visual(attempt["source"], visuals["source_render"], visuals["source_gnu"], "Source")}'
-        f'<div class="arrow">→</div>{visual(attempt["middle"], visuals["middle_render"], visuals["middle_gnu"], "Converted")}'
-        f'<div class="arrow">→</div>{visual(attempt["terminal"], visuals["terminal_render"], visuals["terminal_gnu"], "Round trip")}</div>'
-        f'{diff_table(attempt["middle_diff_from_reference"], "Converted canonical state vs Calculator 0.2.0")}'
-        f'{diff_table(attempt["roundtrip_diff_from_source"], "Round-trip canonical state vs source")}</article>'
+        f'<article class="method-card"><h4>{e(attempt["label"])}</h4>'
+        f'<div class="status-row">{badges}</div>'
+        f'{gnu_visual(gnu_id, gnu_record, gnu_label)}'
+        f'{board_visual(board_id, board_record, board_label)}'
+        f'{canonical}{roundtrip}</article>'
     )
 
 
-def reference_card(direction: str, source: str, middle: str, terminal: str, visuals: dict[str, Any], bglab_output: str | None = None, gnu_post_import: str | None = None) -> str:
+def reference_card(
+    direction: str,
+    source: str,
+    middle: str,
+    terminal: str,
+    visuals: dict[str, Any],
+    bglab_output: str | None = None,
+    gnu_post_import: str | None = None,
+) -> str:
     diagnostics = []
     if gnu_post_import:
-        diagnostics.append(f'<p><strong>GNU post-import diagnostic:</strong> <code>{e(gnu_post_import)}</code></p>')
+        diagnostics.append(
+            f'<p><strong>GNU post-import diagnostic:</strong> <code>{e(gnu_post_import)}</code></p>'
+        )
     if bglab_output:
-        diagnostics.append(f'<p><strong>Diagnostic: R bglab:</strong> <code>{e(bglab_output)}</code></p>')
+        diagnostics.append(
+            f'<p><strong>Diagnostic: R bglab:</strong> <code>{e(bglab_output)}</code></p>'
+        )
     return (
-        '<article class="reference"><h4>Reference: backgammoncalculator 0.2.0</h4>'
-        f'<p>{e(direction)}</p><div class="lane">{visual(source, visuals["source_render"], visuals["source_gnu"], "Source")}'
-        f'<div class="arrow">→</div>{visual(middle, visuals["middle_render"], visuals["middle_gnu"], "Converted")}'
-        f'<div class="arrow">→</div>{visual(terminal, visuals["terminal_render"], visuals["terminal_gnu"], "Round trip")}</div>'
-        + ''.join(diagnostics) + '</article>'
+        '<article class="reference-card"><h4>Reference: backgammoncalculator 0.2.0</h4>'
+        f'<p>{e(direction)}</p><div class="reference-lane">'
+        f'{visual(source, visuals["source_render"], visuals["source_gnu"], "Source")}'
+        f'{visual(middle, visuals["middle_render"], visuals["middle_gnu"], "Converted reference")}'
+        f'{visual(terminal, visuals["terminal_render"], visuals["terminal_gnu"], "Reference round trip")}'
+        f'</div>{"".join(diagnostics)}</article>'
     )
 
 
-CSS = r''':root{--ink:#17212b;--line:#d7dee6;--navy:#102a43;--green:#176b2c;--greenbg:#eaf7ed;--amber:#8a5a00;--amberbg:#fff4ce;--red:#b42318;--redbg:#ffebe9}*{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:var(--ink);font:14px/1.45 system-ui,Segoe UI,Arial,sans-serif}.top{background:var(--navy);color:white;padding:26px 30px}.top p{max-width:1300px;color:#d7e3ef}.provenance{font-size:12px;background:#091b2b;color:#dce8f4;padding:12px 30px;overflow:auto}main{max-width:2200px;margin:auto;padding:22px}.case{margin-bottom:42px}.case>h2{border-bottom:3px solid #243b53;padding-bottom:8px}.direction{background:#fff;border:1px solid var(--line);border-left:7px solid #829ab1;border-radius:10px;padding:16px;margin-bottom:22px}.reference{border:2px solid #486581;background:#f0f6fb;border-radius:9px;padding:14px;margin-bottom:16px}.methods{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.method{min-width:0;border:1px solid #b9c6d3;border-radius:9px;padding:12px;background:#fbfcfd}.method h4,.reference h4{margin:0 0 9px;font-size:17px}.lane{display:grid;grid-template-columns:minmax(0,1fr) 28px minmax(0,1fr) 28px minmax(0,1fr);gap:7px;align-items:start}.arrow{text-align:center;font-size:25px;padding-top:80px;color:#829ab1}.endpoint{min-width:0}.endpoint h5{margin:0 0 5px}.endpoint code{display:block;background:#101820;color:#fff;padding:8px;border-radius:5px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;min-height:55px}.svg{height:255px;background:white;border:1px solid var(--line);overflow:auto;margin-top:7px}.svg svg{width:100%;height:auto;max-height:245px}.gnu-board{height:255px;background:#111;color:#eee;padding:8px;overflow:auto;white-space:pre;font:10px/1.18 Consolas,monospace;margin-top:7px}.badges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}.badge{border-radius:999px;padding:4px 8px;border:1px solid var(--line);font-size:12px}.badge.pass{background:var(--greenbg);color:var(--green)}.badge.warn{background:var(--amberbg);color:var(--amber)}.badge.fail{background:var(--redbg);color:var(--red)}details{margin-top:10px;border:1px solid var(--line);border-radius:6px;background:#fff}summary{cursor:pointer;font-weight:700;padding:8px}.diff-table{border-collapse:collapse;width:100%;table-layout:fixed}.diff-table th,.diff-table td{border:1px solid var(--line);padding:6px;vertical-align:top;overflow-wrap:anywhere}.diff-table td.diff{background:var(--redbg)}.pass-text{color:var(--green);padding:0 8px}.fail-card{background:var(--redbg)}@media(max-width:1450px){.methods{grid-template-columns:1fr}.lane{grid-template-columns:1fr}.arrow{padding:0;transform:rotate(90deg)}}'''
+CSS = r'''
+:root {
+  font-family: system-ui, "Segoe UI", Arial, sans-serif;
+  color: #111b35;
+  background: #f4f1eb;
+  --bs-navy: #111b35;
+  --bs-cream: #f8eedd;
+  --bs-tan: #d8c5a5;
+  --line: #d7dee6;
+  --green: #245c3d;
+  --green-bg: #e7f5eb;
+  --amber: #7a5200;
+  --amber-bg: #fff0c7;
+  --red: #b42318;
+  --red-bg: #ffebe9;
+}
+* { box-sizing: border-box; }
+body { max-width: 2100px; margin: 0 auto; padding: 24px; }
+.top { background: var(--bs-navy); color: var(--bs-cream); padding: 24px 28px; border-radius: 12px; }
+.top h1 { margin: 0 0 8px; }
+.top p { max-width: 1400px; margin-bottom: 0; }
+.provenance { margin-top: 10px; padding: 10px 14px; background: #fff; border: 1px solid var(--bs-tan); border-radius: 8px; font-size: 12px; overflow-wrap: anywhere; }
+.case { background: #fff; border: 1px solid #d9dfe5; border-radius: 12px; padding: 22px; margin: 24px 0; }
+.case > h2 { margin-top: 0; border-bottom: 3px solid var(--bs-navy); padding-bottom: 8px; }
+.direction { border-top: 3px solid var(--bs-tan); margin-top: 28px; padding-top: 18px; }
+.reference-card { border: 2px solid var(--bs-tan); background: #fcf8f1; border-radius: 9px; padding: 12px; margin: 12px 0 18px; }
+.reference-card h4, .method-card h4 { margin-top: 0; }
+.reference-lane { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.methods { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.method-card { min-width: 0; border: 1px solid #ccd5df; border-radius: 9px; padding: 12px; background: #fbfcfd; }
+.identifier { display: block; overflow-wrap: anywhere; word-break: break-word; margin: 7px 0; font: 11px/1.35 Consolas, "Courier New", monospace; color: #111b35; }
+.board-card { border: 1px solid #d8dfe6; border-radius: 7px; padding: 8px; margin: 10px 0; background: #fff; }
+.board-card h5, .canonical-card h5 { margin: 0 0 7px; }
+.svg-wrap { height: 285px; overflow: auto; border: 1px solid #e1e5ea; background: #fff; }
+.svg-wrap svg { width: 100%; height: auto; max-height: 275px; }
+.board-card.cli pre { margin: 0; min-height: 270px; max-height: 330px; overflow: auto; white-space: pre; background: #101820; color: #e9f1f7; padding: 9px; border-radius: 5px; font: 10px/1.18 Consolas, "Courier New", monospace; }
+.board-card.unavailable { border-style: dashed; background: #f1f2f3; }
+.status-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; background: #eee; }
+.badge.exact, .badge.semantic_exact { background: var(--green-bg); color: var(--green); }
+.badge.canonicalized_metadata, .badge.different { background: var(--amber-bg); color: var(--amber); }
+.badge.state_mismatch, .badge.error, .badge.invalid_canonical { background: var(--red-bg); color: var(--red); }
+.canonical-card { margin: 12px 0; border-top: 2px solid var(--bs-tan); padding-top: 10px; }
+.comparison-line { color: #4f5964; font-size: 13px; margin-bottom: 7px; }
+details { margin-top: 8px; border: 1px solid #d7dee6; border-radius: 7px; overflow: hidden; background: #fff; }
+summary { cursor: pointer; font-weight: 700; padding: 8px 10px; background: #f8f9fa; }
+.json-compare { border-top: 1px solid #d7dee6; background: #d7dee6; max-height: 390px; overflow: auto; }
+.json-head, .json-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1px; }
+.json-head > div { background: #dfe7ef; padding: 9px 11px; font-weight: 700; position: sticky; top: 0; z-index: 1; }
+.json-cell { min-width: 0; background: #101820; color: #e8f1f8; padding: 6px 8px; }
+.json-cell pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font: 11px/1.4 Consolas, "Courier New", monospace; }
+.json-cell.diff { background: var(--red-bg); color: var(--red); font-weight: 700; }
+.diff-table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+.diff-table th, .diff-table td { border: 1px solid #ddd; padding: 6px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.diff-table td.diff { background: var(--red-bg); color: var(--red); }
+.pass-text { color: var(--green); padding: 0 8px; }
+.error-text { color: var(--red); }
+.fail-card { background: var(--red-bg); }
+@media (max-width: 1500px) { .methods { grid-template-columns: repeat(3, minmax(330px, 1fr)); overflow-x: auto; } }
+@media (max-width: 900px) { .reference-lane { grid-template-columns: 1fr; } }
+'''
 
 
 def render_page(case_sections: list[str], provenance: dict[str, Any]) -> str:
     p = e(json.dumps(provenance, indent=2, ensure_ascii=False))
-    board_sha = e(provenance.get("renderer", {}).get("remote_sha"))
+    renderer = provenance.get("renderer", {})
+    board_sha = e(renderer.get("resolved_commit") or renderer.get("expected_commit"))
+    board_version = e(renderer.get("package_version"))
     calc_sha = e(provenance.get("calculator", {}).get("release_commit"))
-    return f'''<!doctype html><html><head><meta charset="utf-8"><title>Backgammon Identifier Oracle-First Gallery</title><style>{CSS}</style></head><body><header class="top"><h1>Backgammon Identifier Oracle-First Gallery</h1><p>Reference: backgammoncalculator 0.2.0. Methods: Native Python, Engine Kit public API, Direct AnkiGammon. GNU post-import and R bglab are diagnostics. Stable players are never swapped for equivalence.</p></header><div class="provenance"><strong>Renderer:</strong> backgammonboard source commit {board_sha} · <strong>Calculator:</strong> {calc_sha}</div><main>{''.join(case_sections)}<section class="case"><h2>Provenance</h2><pre>{p}</pre></section></main></body></html>'''
+    return f'''<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Oracle-first XGID and GNUID comparison</title><style>{CSS}</style></head><body>
+<header class="top"><h1>Oracle-first XGID ↔ GNUID verification</h1>
+<p>Three method columns: Native Python, Engine Kit public API, and Direct AnkiGammon. In each method column, GNU CLI rendering is on top, the current BS backgammonboard rendering is underneath, and the canonical representation follows. Stable players are never swapped for appearance.</p></header>
+<div class="provenance"><strong>backgammonboard:</strong> {board_version} at {board_sha}, BS colors/style · <strong>Calculator:</strong> {calc_sha}</div>
+<main data-layout="three-method-columns">{''.join(case_sections)}
+<section class="case"><h2>Provenance</h2><pre>{p}</pre></section></main></body></html>'''

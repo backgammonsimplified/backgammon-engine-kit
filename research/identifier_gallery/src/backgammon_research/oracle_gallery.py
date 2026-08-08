@@ -20,6 +20,9 @@ def load_cases(path:Path)->list[Case]:
 def _bek():return importlib.import_module("backgammon_engine_kit")
 def _canonical(i:str)->dict[str,Any]:
     b=_bek(); p=b.position_from_xgid(i) if i.startswith("XGID=") else b.position_from_gnuid(i); return p.to_dict()
+def _canonical_safe(i:str)->dict[str,Any]|None:
+    try:return _canonical(i)
+    except Exception:return None
 def _factual(i:str)->dict[str,Any]:
     v=json.loads(json.dumps(_canonical(i)));v.get("state",{}).pop("game_state",None);v.get("rules",{}).pop("maximum_cube",None);return v
 def _same(a:str,b:str)->bool:
@@ -107,9 +110,12 @@ def build_gallery(*,cases_path:Path,output_dir:Path,r_library:Path,calculator=No
             for s in surfaces:
                 c=s.xgid_to_gnuid if x2g else s.gnuid_to_xgid;r=s.gnuid_to_xgid if x2g else s.xgid_to_gnuid;a=_attempt(s.name,direction,source,ref_mid,c,r);attempts.append(a)
                 comparisons.append({k:v for k,v in a.items() if k not in {"middle_diff_from_reference","roundtrip_diff_from_source"}}|{"case_id":case.case_id});roundtrips.append({"case_id":case.case_id,"direction":direction,"surface":s.name,"source":source,"middle":a.get("middle"),"terminal":a.get("terminal"),"exact":a["roundtrip_exact"],"semantic":a["roundtrip_semantic"]})
-            ids={source,ref_mid,ref_term}|{a[k] for a in attempts for k in ("middle","terminal") if a.get(k)};rc={};gc={}
-            for n,i in enumerate(sorted(ids)):rc[i]=_render(renderer,i,renders,f"{case.case_id}-{direction[0]}-{n}");gc[i]=_gnu(gnu,i,gnu_dir,f"{case.case_id}-{direction[0]}-{n}")
-            def vis(a,b,c):return {"source_render":rc.get(a),"middle_render":rc.get(b),"terminal_render":rc.get(c),"source_gnu":gc.get(a),"middle_gnu":gc.get(b),"terminal_gnu":gc.get(c)}
+            ids={source,ref_mid,ref_term}|{a[k] for a in attempts for k in ("middle","terminal") if a.get(k)};rc={};gc={};cc={}
+            for n,i in enumerate(sorted(ids)):
+                rc[i]=_render(renderer,i,renders,f"{case.case_id}-{direction[0]}-{n}")
+                gc[i]=_gnu(gnu,i,gnu_dir,f"{case.case_id}-{direction[0]}-{n}")
+                cc[i]=_canonical_safe(i)
+            def vis(a,b,c):return {"source_render":rc.get(a),"middle_render":rc.get(b),"terminal_render":rc.get(c),"source_gnu":gc.get(a),"middle_gnu":gc.get(b),"terminal_gnu":gc.get(c),"source_canonical":cc.get(a),"middle_canonical":cc.get(b),"terminal_canonical":cc.get(c),"reference_middle_canonical":cc.get(ref_mid)}
             ref=reference_card(direction,source,ref_mid,ref_term,vis(source,ref_mid,ref_term),bglab_output=bglab_out,gnu_post_import=gnu_post);methods=''.join(method_card(a,vis(source,a.get("middle") or source,a.get("terminal") or source)) for a in attempts)
             dirs.append(f'<section class="direction"><h3>{e(direction)}</h3>{ref}<div class="methods">{methods}</div></section>');cases_out.append({"case_id":case.case_id,"label":case.label,"direction":direction,"source":source,"reference_middle":ref_mid,"reference_terminal":ref_term,"gnu_post_import":gnu_post,"bglab_output":bglab_out,"methods":attempts})
         case_html.append(f'<section class="case"><h2>{e(case.case_id)} · {e(case.label)}</h2>{"".join(dirs)}</section>')

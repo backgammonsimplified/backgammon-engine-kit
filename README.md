@@ -51,10 +51,13 @@ for represented, external-context, and unsupported state.
 
 ## Identifier-to-request bridge
 
-The public bridge parses complete GNUIDs, Position IDs, and XGIDs through
-`ankigammon.utils.gnuid` and `ankigammon.utils.xgid`. It retains the exact raw
-identifier, native metadata, canonical checker placement, source orientation,
-player mapping, normalization effects, and explicit unavailable state.
+The public bridge accepts complete GNUIDs, Position IDs, and XGIDs. It retains
+the exact raw identifier and AnkiGammon metadata, while Engine Kit performs the
+stable cross-format checker and player mapping. XGID top/X is always
+`player_x`; XGID bottom/O is always `player_o`; GNU player 0 maps to top/X and
+GNU player 1 maps to bottom/O. Turn changes therefore cannot swap checker
+ownership, cube ownership, or scores. The result also preserves source
+orientation, normalization effects, and explicit unavailable state.
 
 ```python
 from backgammon_engine_kit import to_gnu_request, to_sage_request

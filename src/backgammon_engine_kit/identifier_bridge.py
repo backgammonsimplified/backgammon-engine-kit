@@ -1,8 +1,10 @@
-"""Public AnkiGammon-backed identifier-to-analysis-request bridge.
+"""Public identifier-to-analysis-request bridge.
 
-The bridge preserves source identity and perspective facts while keeping
-checker placement separate from match state.  It prepares, but never executes,
-the existing Engine Kit GNU and Sage requests.
+AnkiGammon supplies native metadata, but Engine Kit owns stable checker and
+player identity across XGID and GNUID.  The bridge preserves source identity
+and perspective facts while keeping checker placement separate from match
+state.  It prepares, but never executes, the existing Engine Kit GNU and Sage
+requests.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from typing import Any, Mapping, Optional, Tuple
 from ankigammon.models import CubeState as AnkiCubeState
 from ankigammon.models import Player as AnkiPlayer
 from ankigammon.models import Position as AnkiPosition
-from ankigammon.utils.gnuid import encode_gnuid, parse_gnuid
+from ankigammon.utils.gnuid import parse_gnuid
 from ankigammon.utils.xgid import parse_xgid
 
 from .models import AnalysisRequest, Position
@@ -78,20 +80,10 @@ _CANONICAL_PLAYER_MAPPING = MappingProxyType(
         "player_o": "AnkiGammon Player.O; bottom; negative checkers",
     }
 )
-_COMPLETE_GNUID_CANONICAL_PLAYER_MAPPING = MappingProxyType(
+_COMPLETE_GNUID_SOURCE_PLAYER_MAPPING = MappingProxyType(
     {
-        "player_0": "O; AnkiGammon Player.O; stable GNU player 0",
-        "player_1": "X; AnkiGammon Player.X; stable GNU player 1",
-    }
-)
-_COMPLETE_GNUID_SOURCE_PLAYER_MAPPINGS = MappingProxyType(
-    {
-        "player_o": MappingProxyType(
-            {"AnkiGammon Player.O/negative": "player_0", "AnkiGammon Player.X/positive": "player_1"}
-        ),
-        "player_x": MappingProxyType(
-            {"AnkiGammon Player.X/positive": "player_0", "AnkiGammon Player.O/negative": "player_1"}
-        ),
+        "GNU player 0 / XGID top / X": "player_x",
+        "GNU player 1 / XGID bottom / O": "player_o",
     }
 )
 
@@ -126,7 +118,7 @@ def _thaw(value: Any) -> Any:
 
 @dataclass(frozen=True)
 class CanonicalCheckerPosition:
-    """AnkiGammon's stable absolute board: X/top positive, O/bottom negative."""
+    """Stable absolute board: X/top positive, O/bottom negative."""
 
     points: Tuple[int, ...]
     x_off: int
@@ -352,12 +344,135 @@ def _canonical_position(native: AnkiPosition) -> CanonicalCheckerPosition:
     return CanonicalCheckerPosition(tuple(native.points), native.x_off, native.o_off)
 
 
-def _complete_gnuid_dice_owner(raw_identifier):
-    """Read GNU Match ID DiceOwner, which controls Position ID block ownership."""
+def _decode_base64_without_padding(value, expected_bytes, label):
+    try:
+        raw = base64.b64decode(value + "=" * ((4 - len(value) % 4) % 4), validate=True)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("{} is not valid Base64".format(label)) from exc
+    if len(raw) != expected_bytes:
+        raise ValueError("{} must decode to {} bytes".format(label, expected_bytes))
+    return raw
 
+
+def _little_endian_bits(raw):
+    return tuple((byte >> bit) & 1 for byte in raw for bit in range(8))
+
+
+def _bit_value(bits, start, count):
+    value = 0
+    for offset in range(count):
+        value |= bits[start + offset] << offset
+    return value
+
+
+def _set_bits(bits, start, count, value):
+    for offset in range(count):
+        bits[start + offset] = (value >> offset) & 1
+
+
+def _complete_gnuid_match_bits(raw_identifier):
     match_id = raw_identifier.split(":", 1)[1]
-    raw_match = base64.b64decode(match_id, validate=True)
-    return "player_x" if raw_match[0] & (1 << 6) else "player_o"
+    return _little_endian_bits(_decode_base64_without_padding(match_id, 9, "GNU Match ID"))
+
+
+def _complete_gnuid_on_roll(raw_identifier):
+    """Return stable top/X or bottom/O identity from GNU DiceOwner.
+
+    GNU player 0 is the XGID top/X player and GNU player 1 is the XGID
+    bottom/O player.  AnkiGammon's ``Player.O``/``Player.X`` names for these
+    bits are local implementation labels and must not escape into the
+    canonical bridge.
+    """
+
+    dice_owner = _complete_gnuid_match_bits(raw_identifier)[6]
+    return "player_x" if dice_owner == 0 else "player_o"
+
+
+def _decode_gnu_position_blocks(position_id):
+    """Decode the two relative 25-slot GNU Position ID checker blocks."""
+
+    bits = _little_endian_bits(
+        _decode_base64_without_padding(position_id, 10, "GNU Position ID")
+    )
+    blocks = []
+    cursor = 0
+    for _ in range(2):
+        block = []
+        for _ in range(25):
+            count = 0
+            while cursor < len(bits) and bits[cursor] == 1:
+                count += 1
+                cursor += 1
+            if count > 15:
+                raise ValueError("GNU Position ID exceeds the 15-checker profile")
+            if cursor >= len(bits):
+                raise ValueError("GNU Position ID terminates inside a unary point count")
+            cursor += 1
+            block.append(count)
+        blocks.append(tuple(block))
+    if any(bits[cursor:]):
+        raise ValueError("GNU Position ID contains nonzero padding bits")
+    return tuple(blocks)
+
+
+def _canonical_position_from_complete_gnuid(raw_identifier):
+    """Decode GNU's relative blocks into stable X/top and O/bottom checkers."""
+
+    position_id = raw_identifier.split(":", 1)[0]
+    first_block, second_block = _decode_gnu_position_blocks(position_id)
+    on_roll = _complete_gnuid_on_roll(raw_identifier)
+    if on_roll == "player_x":
+        o_block, x_block = first_block, second_block
+    else:
+        x_block, o_block = first_block, second_block
+
+    points = [0] * 26
+    points[0] = x_block[24]
+    points[25] = -o_block[24]
+    for self_point, count in enumerate(x_block[:24], start=1):
+        physical_point = 25 - self_point
+        if count:
+            points[physical_point] = count
+    for self_point, count in enumerate(o_block[:24], start=1):
+        physical_point = self_point
+        if count:
+            if points[physical_point]:
+                raise ValueError("GNU Position ID places both players on one physical point")
+            points[physical_point] = -count
+
+    x_total = sum(x_block)
+    o_total = sum(o_block)
+    return CanonicalCheckerPosition(tuple(points), 15 - x_total, 15 - o_total)
+
+
+def _xgid_checker_count(char):
+    if char == "-":
+        return 0
+    if "a" <= char <= "p":
+        return ord(char) - ord("a") + 1
+    if "A" <= char <= "P":
+        return -(ord(char) - ord("A") + 1)
+    raise ValueError("XGID contains an invalid checker character")
+
+
+def _canonical_position_from_xgid(raw_identifier):
+    """Decode XGID checker ownership without AnkiGammon's turn-dependent swap.
+
+    XGID case is an absolute player identity: lowercase is top/X and uppercase
+    is bottom/O.  The turn field controls who acts, not checker ownership.
+    """
+
+    board_text = raw_identifier[5:].split(":", 1)[0]
+    if len(board_text) != 26:
+        raise ValueError("XGID board must contain 26 characters")
+    points = [_xgid_checker_count(char) for char in board_text]
+    if points[0] < 0:
+        raise ValueError("XGID top bar cannot contain bottom/O checkers")
+    if points[25] > 0:
+        raise ValueError("XGID bottom bar cannot contain top/X checkers")
+    x_total = sum(value for value in points if value > 0)
+    o_total = sum(-value for value in points if value < 0)
+    return CanonicalCheckerPosition(tuple(points), 15 - x_total, 15 - o_total)
 
 
 def _empty_state():
@@ -411,18 +526,23 @@ def _parse_position_id(raw_identifier):
 
 
 def _parse_complete_gnuid(raw_identifier):
-    native, native_metadata = parse_gnuid(raw_identifier)
-    dice_owner = _complete_gnuid_dice_owner(raw_identifier)
-    ownership_normalized = dice_owner == "player_x"
+    _, native_metadata = parse_gnuid(raw_identifier)
+    match_bits = _complete_gnuid_match_bits(raw_identifier)
+    on_roll = _complete_gnuid_on_roll(raw_identifier)
+    ownership_normalized = on_roll == "player_x"
+    cube_owner_code = _bit_value(match_bits, 4, 2)
+    if cube_owner_code == 2:
+        raise ValueError("GNU Match ID contains reserved cube-owner value")
+    cube_owner = {0: "player_x", 1: "player_o", 3: "centered"}[cube_owner_code]
     values, availability = _empty_state()
     values.update(
         {
-            "on_roll": _canonical_player(native_metadata["on_roll"]),
+            "on_roll": on_roll,
             "dice": native_metadata.get("dice"),
             "cube_value": native_metadata["cube_value"],
-            "cube_owner": _canonical_cube_owner(native_metadata["cube_owner"]),
-            "score_x": native_metadata["score_x"],
-            "score_o": native_metadata["score_o"],
+            "cube_owner": cube_owner,
+            "score_x": _bit_value(match_bits, 36, 15),
+            "score_o": _bit_value(match_bits, 51, 15),
             "match_length": native_metadata["match_length"],
             "crawford": native_metadata["crawford"],
             "game_state": native_metadata["game_state"],
@@ -457,12 +577,12 @@ def _parse_complete_gnuid(raw_identifier):
         raw_identifier=raw_identifier,
         identifier_format=IDENTIFIER_FORMAT_COMPLETE_GNUID,
         native_metadata=native_metadata,
-        canonical_position=_canonical_position(native),
+        canonical_position=_canonical_position_from_complete_gnuid(raw_identifier),
         state=state,
         source_turn=values["on_roll"],
-        source_orientation="gnu-position-id-opponent-first-current-player-second",
-        source_player_mapping=_COMPLETE_GNUID_SOURCE_PLAYER_MAPPINGS[dice_owner],
-        canonical_player_mapping=_COMPLETE_GNUID_CANONICAL_PLAYER_MAPPING,
+        source_orientation="gnu-position-id-relative-blocks-normalized-to-top-x-and-bottom-o",
+        source_player_mapping=_COMPLETE_GNUID_SOURCE_PLAYER_MAPPING,
+        canonical_player_mapping=_CANONICAL_PLAYER_MAPPING,
         normalization_applied=ownership_normalized,
         point_reversal_applied=False,
         bar_reversal_applied=False,
@@ -474,7 +594,7 @@ def _parse_complete_gnuid(raw_identifier):
 
 
 def _parse_xgid(raw_identifier):
-    native, native_metadata = parse_xgid(raw_identifier)
+    _, native_metadata = parse_xgid(raw_identifier)
     values, availability = _empty_state()
     match_length = native_metadata["match_length"]
     values.update(
@@ -514,24 +634,19 @@ def _parse_xgid(raw_identifier):
     action = raw_identifier.split(":")[4]
     unsupported = () if action not in ("D", "B", "R") else ("pending_cube_action:" + action,)
     state = _state(values, availability)
-    top_on_roll = values["on_roll"] == "player_x"
     return ParsedAnalysisIdentifier(
         raw_identifier=raw_identifier,
         identifier_format=IDENTIFIER_FORMAT_XGID,
         native_metadata=native_metadata,
-        canonical_position=_canonical_position(native),
+        canonical_position=_canonical_position_from_xgid(raw_identifier),
         state=state,
         source_turn=values["on_roll"],
-        source_orientation=(
-            "xgid-top-on-roll-points-and-bars-reversed"
-            if top_on_roll
-            else "xgid-bottom-on-roll-points-and-bars-forward"
-        ),
+        source_orientation="xgid-fixed-top-x-bottom-o",
         source_player_mapping=_SOURCE_PLAYER_MAPPING,
         canonical_player_mapping=_CANONICAL_PLAYER_MAPPING,
-        normalization_applied=top_on_roll,
-        point_reversal_applied=top_on_roll,
-        bar_reversal_applied=top_on_roll,
+        normalization_applied=False,
+        point_reversal_applied=False,
+        bar_reversal_applied=False,
         unavailable_state=state.unavailable_fields,
         unsupported_state=unsupported,
         position_id=raw_identifier.split(":", 1)[0][5:],
@@ -662,76 +777,91 @@ def to_canonical_analysis_request(
     )
 
 
-def _native_position(position):
-    return AnkiPosition(points=list(position.points), x_off=position.x_off, o_off=position.o_off)
+def _canonical_player_blocks(position):
+    """Return stable self-relative top/X and bottom/O GNU checker blocks."""
+
+    points = position.points
+    x_block = [max(points[25 - self_point], 0) for self_point in range(1, 25)]
+    o_block = [max(-points[self_point], 0) for self_point in range(1, 25)]
+    x_block.append(max(points[0], 0))
+    o_block.append(max(-points[25], 0))
+    if sum(x_block) + position.x_off != 15 or sum(o_block) + position.o_off != 15:
+        raise IdentifierBridgeError("canonical checker totals do not equal 15 per player")
+    return tuple(x_block), tuple(o_block)
 
 
-def _native_player(value):
-    return AnkiPlayer.X if value == "player_x" else AnkiPlayer.O
+def _encode_gnu_position_id(position, on_roll):
+    """Encode stable players into GNU's DiceOwner-relative Position ID blocks."""
 
-
-def _native_cube_owner(value):
-    return {
-        "centered": AnkiCubeState.CENTERED,
-        "player_x": AnkiCubeState.X_OWNS,
-        "player_o": AnkiCubeState.O_OWNS,
-    }[value]
-
-
-def _correct_ankigammon_match_id(encoded_gnuid, on_roll, game_state=None):
-    """Correct GNU-required state bits after AnkiGammon 1.7.0 encoding.
-
-    AnkiGammon remains responsible for the complete encoding.  The isolated
-    correction sets DiceOwner (bit 6) and TurnOwner (bit 11), restores a
-    represented GameState (bits 8-10), and sets the canonical framing bit
-    (bit 66).
-    """
-
-    position_id, match_id = encoded_gnuid.split(":", 1)
-    raw = bytearray(base64.b64decode(match_id + "="))
+    x_block, o_block = _canonical_player_blocks(position)
     if on_roll == "player_x":
-        raw[0] |= 1 << 6
-        raw[1] |= 1 << 3
+        blocks = (o_block, x_block)
+    elif on_roll == "player_o":
+        blocks = (x_block, o_block)
     else:
-        raw[0] &= ~(1 << 6)
-        raw[1] &= ~(1 << 3)
-    if game_state is not None:
-        if game_state not in (0, 1):
-            raise IdentifierBridgeError("only setup or playing game state can be encoded for analysis")
-        raw[1] = (raw[1] & ~0x07) | game_state
-    raw[8] |= 1 << 2
-    corrected = base64.b64encode(bytes(raw)).decode("ascii").rstrip("=")
-    return position_id + ":" + corrected
+        raise IdentifierBridgeError("GNU encoding requires a known player on roll")
+
+    bits = []
+    for block in blocks:
+        for count in block:
+            bits.extend([1] * count)
+            bits.append(0)
+    if len(bits) > 80:
+        raise IdentifierBridgeError("canonical checker position exceeds GNU Position ID capacity")
+    bits.extend([0] * (80 - len(bits)))
+    raw = bytearray(10)
+    for index, bit in enumerate(bits):
+        raw[index // 8] |= bit << (index % 8)
+    return base64.b64encode(bytes(raw)).decode("ascii").rstrip("=")
 
 
-def _gnu_dice_owner(canonical_request):
-    """Map source players to GNU's stable Position ID player blocks."""
+def _encode_gnu_match_id(state):
+    """Encode stable top/X and bottom/O state directly into GNU Match ID bits."""
 
-    on_roll = canonical_request.state.on_roll
-    if canonical_request.identifier.identifier_format == IDENTIFIER_FORMAT_XGID:
-        return "player_o" if on_roll == "player_x" else "player_x"
-    return on_roll
+    if state.game_state is not None and state.game_state not in (0, 1):
+        raise IdentifierBridgeError("only setup or playing game state can be encoded for analysis")
+    bits = [0] * 72
+    cube_exponent = state.cube_value.bit_length() - 1
+    _set_bits(bits, 0, 4, cube_exponent)
+    cube_owner_code = {
+        "player_x": 0,
+        "player_o": 1,
+        "centered": 3,
+    }[state.cube_owner]
+    _set_bits(bits, 4, 2, cube_owner_code)
+
+    if state.on_roll == "player_x":
+        on_roll_code = 0
+    elif state.on_roll == "player_o":
+        on_roll_code = 1
+    else:
+        raise IdentifierBridgeError("GNU encoding requires a known player on roll")
+    bits[6] = on_roll_code
+    bits[7] = 1 if state.crawford else 0
+    _set_bits(bits, 8, 3, 1 if state.game_state is None else state.game_state)
+    bits[11] = on_roll_code
+
+    if state.dice is not None:
+        _set_bits(bits, 15, 3, state.dice[0])
+        _set_bits(bits, 18, 3, state.dice[1])
+    _set_bits(bits, 21, 15, state.match_length)
+    _set_bits(bits, 36, 15, state.score_x)
+    _set_bits(bits, 51, 15, state.score_o)
+    bits[66] = 1
+
+    raw = bytearray(9)
+    for index, bit in enumerate(bits):
+        raw[index // 8] |= bit << (index % 8)
+    return base64.b64encode(bytes(raw)).decode("ascii").rstrip("=")
 
 
 def _encode_engine_gnuid(canonical_request):
     state = canonical_request.state
-    crawford = False if state.availability["crawford"] == "not_applicable" else state.crawford
-    encoded = encode_gnuid(
-        _native_position(canonical_request.identifier.canonical_position),
-        cube_value=state.cube_value,
-        cube_owner=_native_cube_owner(state.cube_owner),
-        dice=state.dice,
-        on_roll=_native_player(state.on_roll),
-        score_x=state.score_x,
-        score_o=state.score_o,
-        match_length=state.match_length,
-        crawford=crawford,
+    position_id = _encode_gnu_position_id(
+        canonical_request.identifier.canonical_position,
+        state.on_roll,
     )
-    return _correct_ankigammon_match_id(
-        encoded,
-        _gnu_dice_owner(canonical_request),
-        state.game_state,
-    )
+    return position_id + ":" + _encode_gnu_match_id(state)
 
 
 def _prepare(identifier, decision_type, engine, configuration, prefer_original, explicit_state):

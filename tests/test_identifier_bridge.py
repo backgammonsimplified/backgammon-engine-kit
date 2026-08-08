@@ -1,11 +1,11 @@
-"""Focused AnkiGammon identifier-bridge coverage.
+"""Focused stable-player identifier-bridge coverage.
 
 Fixture provenance:
 - CHECKER_GNUID and the original cube board come from the repository's
   committed GNU 1.08.003 evidence bundles.
 - COMPLETE_CUBE_GNUID and both XGIDs were produced with AnkiGammon 1.7.0
-  parse/encode round trips.  GNU Match IDs include the two GNU-required bits
-  covered by ``test_ankigammon_gnuid_encoder_defect_is_isolated_and_corrected``.
+  parse/encode round trips. Engine Kit deliberately does not inherit
+  AnkiGammon's turn-dependent checker ownership labels.
 """
 
 import base64
@@ -26,6 +26,7 @@ from backgammon_engine_kit import (
 from backgammon_engine_kit.position_contract import (
     canonical_to_bgsage,
     decode_gnuid,
+    decode_xgid,
     enrich_position,
 )
 from backgammon_engine_kit.sage.invocation import canonical_position_context
@@ -44,8 +45,8 @@ RET_005_CHECKER_GNUID = "4NvBCSCYc8MBUA:MAHqAAAAAAAE"
 RET_006_CHECKER_GNUID = "3HsHAgD1PQ8AAA:QYnuAAAAAAAE"
 RET_010_POST_CRAWFORD_CUBE_GNUID = "jGfwATDgc/ABMA:cAngAGAAKAAE"
 POSITION_ID = "PAAAICMAAAAAAA"
-GNU_TOP = "PAAAICMAAAAAAA:cAkAAAAAAAAE"
-GNU_BOTTOM = "PAAAICMAAAAAAA:MAEAAAAAAAAE"
+GNU_BOTTOM_ON_ROLL = "PAAAICMAAAAAAA:cAkAAAAAAAAE"
+GNU_TOP_ON_ROLL = "PAAAICMAAAAAAA:MAEAAAAAAAAE"
 XGID_TOP = "XGID=---D---------------a--b-a-:0:0:-1:00:0:0:0:0:10"
 XGID_BOTTOM = "XGID=-A-B--A---------------d---:0:0:1:00:0:0:0:0:10"
 AUTHENTIC_XGID_TOP = "XGID=---D---------------a--b-a-:0:0:-1:00:0:0:0:0:8"
@@ -58,6 +59,14 @@ SYNTHETIC_DICE_BEARING_CRAWFORD_XGID = (
 )
 AUTHENTIC_NON_CRAWFORD_CUBE_XGID = "XGID=-b----E-C---eE---c-e----B-:0:0:1:00:0:0:0:0:8"
 AUTHENTIC_PENDING_DOUBLE_XGID = "XGID=-b----E-C---eE---c-e----B-:1:1:1:D:0:0:0:0:10"
+KNOWN_MISMATCH_TOP_XGID = "XGID=-BDB-------------a------e-:1:-1:-1:42:0:0:0:5:8"
+KNOWN_MISMATCH_TOP_GNUID = "ewMAAD4gAAAAAA:AQGqAAAAAAAE"
+MATCH_7_ASYMMETRIC_XGID = "XGID=-b----E-C---eE---c-e----B-:0:0:1:00:2:4:0:7:10"
+MATCH_7_ASYMMETRIC_GNUID = "4HPwATDgc/ABMA:cAngAEAAEAAE"
+CUBE_OWNED_O_XGID = "XGID=-b----E-C---eE---c-e----B-:1:1:1:00:0:0:0:0:10"
+CUBE_OWNED_O_GNUID = "4HPwATDgc/ABMA:UQkAAAAAAAAE"
+CUBE_OWNED_X_XGID = "XGID=-b----E-C---eE---c-e----B-:1:-1:1:00:0:0:0:0:10"
+CUBE_OWNED_X_GNUID = "4HPwATDgc/ABMA:QQkAAAAAAAAE"
 
 
 def _direct_gnu_encode(position, metadata, *, only_position=False):
@@ -85,27 +94,13 @@ def _with_game_state(raw_identifier, game_state):
 
 def _stable_checker_ownership(parsed):
     points = parsed.canonical_position.points
-    positive_player = parsed.source_player_mapping["AnkiGammon Player.X/positive"]
-    negative_player = parsed.source_player_mapping["AnkiGammon Player.O/negative"]
-    player_points = {
-        positive_player: tuple(max(value, 0) for value in reversed(points[1:25])),
-        negative_player: tuple(max(-value, 0) for value in points[1:25]),
-    }
-    player_bar = {
-        positive_player: max(points[0], 0),
-        negative_player: max(-points[25], 0),
-    }
-    player_off = {
-        positive_player: parsed.canonical_position.x_off,
-        negative_player: parsed.canonical_position.o_off,
-    }
     return {
-        "player_0_points": player_points["player_0"],
-        "player_1_points": player_points["player_1"],
-        "player_0_bar": player_bar["player_0"],
-        "player_1_bar": player_bar["player_1"],
-        "player_0_off": player_off["player_0"],
-        "player_1_off": player_off["player_1"],
+        "player_0_points": tuple(max(value, 0) for value in reversed(points[1:25])),
+        "player_1_points": tuple(max(-value, 0) for value in points[1:25]),
+        "player_0_bar": max(points[0], 0),
+        "player_1_bar": max(-points[25], 0),
+        "player_0_off": parsed.canonical_position.x_off,
+        "player_1_off": parsed.canonical_position.o_off,
     }
 
 
@@ -170,9 +165,9 @@ def test_complete_gnuid_cube_preserves_match_id_state():
     assert parsed.state.dice is None
     assert parsed.state.availability["dice"] == "available"
     assert parsed.state.cube_value == 4
-    assert parsed.state.cube_owner == "player_o"
-    assert parsed.state.score_x == 2
-    assert parsed.state.score_o == 4
+    assert parsed.state.cube_owner == "player_x"
+    assert parsed.state.score_x == 4
+    assert parsed.state.score_o == 2
     assert parsed.state.match_length == 7
     assert parsed.state.crawford is True
 
@@ -240,11 +235,15 @@ def test_finished_resigned_and_dropped_game_state_codes_remain_fail_closed(game_
 def test_ret_004_pending_offer_remains_explicit_and_fail_closed():
     parsed = parse_analysis_identifier(RET_004_PENDING_DOUBLE_GNUID)
     assert parsed.native_metadata["doubled"] is True
-    assert parsed.normalization_applied is True
+    assert parsed.normalization_applied is False
     assert parsed.source_turn == "player_o"
     assert parsed.canonical_player_mapping == {
-        "player_0": "O; AnkiGammon Player.O; stable GNU player 0",
-        "player_1": "X; AnkiGammon Player.X; stable GNU player 1",
+        "player_x": "AnkiGammon Player.X; top; positive checkers",
+        "player_o": "AnkiGammon Player.O; bottom; negative checkers",
+    }
+    assert parsed.source_player_mapping == {
+        "GNU player 0 / XGID top / X": "player_x",
+        "GNU player 1 / XGID bottom / O": "player_o",
     }
     _assert_stable_board(
         RET_004_PENDING_DOUBLE_GNUID,
@@ -258,13 +257,13 @@ def test_ret_004_pending_offer_remains_explicit_and_fail_closed():
         assert prepared.request is None
 
 
-def test_ret_002_x_on_roll_checker_uses_stable_o_x_ownership():
+def test_ret_002_bottom_o_on_roll_checker_uses_stable_o_x_ownership():
     parsed = parse_analysis_identifier(RET_002_CHECKER_GNUID)
-    assert parsed.state.on_roll == "player_x"
-    assert parsed.normalization_applied is True
+    assert parsed.state.on_roll == "player_o"
+    assert parsed.normalization_applied is False
     assert parsed.source_player_mapping == {
-        "AnkiGammon Player.X/positive": "player_0",
-        "AnkiGammon Player.O/negative": "player_1",
+        "GNU player 0 / XGID top / X": "player_x",
+        "GNU player 1 / XGID bottom / O": "player_o",
     }
     _assert_stable_board(
         RET_002_CHECKER_GNUID,
@@ -273,9 +272,9 @@ def test_ret_002_x_on_roll_checker_uses_stable_o_x_ownership():
     )
 
 
-def test_ret_003_x_on_roll_cube_uses_stable_board_and_centered_cube():
+def test_ret_003_bottom_o_on_roll_cube_uses_stable_board_and_centered_cube():
     parsed = parse_analysis_identifier(RET_003_PLAYING_CUBE_GNUID)
-    assert parsed.state.on_roll == "player_x"
+    assert parsed.state.on_roll == "player_o"
     assert parsed.state.cube_owner == "centered"
     _assert_stable_board(
         RET_003_PLAYING_CUBE_GNUID,
@@ -287,7 +286,7 @@ def test_ret_003_x_on_roll_cube_uses_stable_board_and_centered_cube():
 def test_ret_006_asymmetric_board_cube_owner_and_off_counts_are_stable():
     parsed = parse_analysis_identifier(RET_006_CHECKER_GNUID)
     assert parsed.state.cube_value == 2
-    assert parsed.state.cube_owner == "player_o"
+    assert parsed.state.cube_owner == "player_x"
     _assert_stable_board(
         RET_006_CHECKER_GNUID,
         (0, 0, 3, 4, 4, 3, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
@@ -298,8 +297,8 @@ def test_ret_006_asymmetric_board_cube_owner_and_off_counts_are_stable():
 
 def test_ret_010_asymmetric_post_crawford_board_is_stable():
     parsed = parse_analysis_identifier(RET_010_POST_CRAWFORD_CUBE_GNUID)
-    assert parsed.state.score_o == 6
-    assert parsed.state.score_x == 5
+    assert parsed.state.score_x == 6
+    assert parsed.state.score_o == 5
     assert parsed.state.crawford is False
     _assert_stable_board(
         RET_010_POST_CRAWFORD_CUBE_GNUID,
@@ -308,7 +307,7 @@ def test_ret_010_asymmetric_post_crawford_board_is_stable():
     )
 
 
-def test_ret_001_and_ret_005_o_on_roll_ownership_remains_unchanged():
+def test_ret_001_and_ret_005_top_x_on_roll_ownership_remains_unchanged():
     _assert_stable_board(
         RET_001_SETUP_CHECKER_GNUID,
         (0, 0, 0, 0, 0, 5, 0, 3, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2),
@@ -322,8 +321,8 @@ def test_ret_001_and_ret_005_o_on_roll_ownership_remains_unchanged():
     )
     for raw_identifier in (RET_001_SETUP_CHECKER_GNUID, RET_005_CHECKER_GNUID):
         parsed = parse_analysis_identifier(raw_identifier)
-        assert parsed.state.on_roll == "player_o"
-        assert parsed.normalization_applied is False
+        assert parsed.state.on_roll == "player_x"
+        assert parsed.normalization_applied is True
 
 
 def test_pending_resignation_remains_explicit_and_fail_closed():
@@ -426,11 +425,13 @@ def test_authentic_pending_double_xgid_remains_unsupported(prepare):
 @pytest.mark.parametrize(
     "raw,on_roll,normalization,orientation",
     [
-        (XGID_BOTTOM, "player_o", False, "xgid-bottom-on-roll-points-and-bars-forward"),
-        (XGID_TOP, "player_x", True, "xgid-top-on-roll-points-and-bars-reversed"),
+        (XGID_BOTTOM, "player_o", False, "xgid-fixed-top-x-bottom-o"),
+        (XGID_TOP, "player_x", False, "xgid-fixed-top-x-bottom-o"),
     ],
 )
-def test_xgid_exposes_bottom_and_top_perspective_effects(raw, on_roll, normalization, orientation):
+def test_xgid_preserves_fixed_checker_ownership_for_both_players_on_roll(
+    raw, on_roll, normalization, orientation
+):
     parsed = parse_analysis_identifier(raw)
     assert parsed.raw_identifier == raw
     assert parsed.source_turn == on_roll
@@ -442,15 +443,15 @@ def test_xgid_exposes_bottom_and_top_perspective_effects(raw, on_roll, normaliza
     assert "positive checkers" in parsed.canonical_player_mapping["player_x"]
 
 
-def test_matching_ankigammon_gnuid_and_xgid_pairs_have_equal_canonical_positions():
-    assert parse_analysis_identifier(GNU_TOP).canonical_position == parse_analysis_identifier(XGID_TOP).canonical_position
-    assert parse_analysis_identifier(GNU_BOTTOM).canonical_position == parse_analysis_identifier(XGID_BOTTOM).canonical_position
-    assert parse_analysis_identifier(GNU_TOP).canonical_position == parse_analysis_identifier(GNU_BOTTOM).canonical_position
+def test_matching_gnuid_and_xgid_pairs_have_equal_stable_canonical_positions():
+    assert parse_analysis_identifier(GNU_TOP_ON_ROLL).canonical_position == parse_analysis_identifier(XGID_TOP).canonical_position
+    assert parse_analysis_identifier(GNU_BOTTOM_ON_ROLL).canonical_position == parse_analysis_identifier(XGID_BOTTOM).canonical_position
+    assert parse_analysis_identifier(GNU_BOTTOM_ON_ROLL).canonical_position != parse_analysis_identifier(GNU_TOP_ON_ROLL).canonical_position
 
 
 @pytest.mark.parametrize(
     "raw_xgid,expected_gnuid",
-    [(XGID_BOTTOM, GNU_TOP), (AUTHENTIC_XGID_TOP, GNU_BOTTOM)],
+    [(XGID_BOTTOM, GNU_BOTTOM_ON_ROLL), (AUTHENTIC_XGID_TOP, GNU_TOP_ON_ROLL)],
 )
 def test_source_authentic_xgid_conversions_are_exact_and_physically_equal(raw_xgid, expected_gnuid):
     xgid = parse_analysis_identifier(raw_xgid)
@@ -461,6 +462,85 @@ def test_source_authentic_xgid_conversions_are_exact_and_physically_equal(raw_xg
         assert prepared.ready
         assert prepared.engine_identifier == expected_gnuid
         assert prepared.engine_identifier.split(":", 1) == expected_gnuid.split(":", 1)
+
+
+@pytest.mark.parametrize(
+    "raw_xgid,decision_type,expected_gnuid",
+    [
+        (KNOWN_MISMATCH_TOP_XGID, "checker", KNOWN_MISMATCH_TOP_GNUID),
+        (MATCH_7_ASYMMETRIC_XGID, "cube", MATCH_7_ASYMMETRIC_GNUID),
+        (CUBE_OWNED_O_XGID, "cube", CUBE_OWNED_O_GNUID),
+        (CUBE_OWNED_X_XGID, "cube", CUBE_OWNED_X_GNUID),
+    ],
+)
+def test_gallery_regressions_preserve_stable_player_state(
+    raw_xgid, decision_type, expected_gnuid
+):
+    source = parse_analysis_identifier(raw_xgid)
+    for prepare in (to_gnu_request, to_sage_request):
+        prepared = prepare(raw_xgid, decision_type)
+        assert prepared.ready
+        assert prepared.engine_identifier == expected_gnuid
+        converted = parse_analysis_identifier(prepared.engine_identifier)
+        assert converted.canonical_position == source.canonical_position
+        assert converted.state.on_roll == source.state.on_roll
+        assert converted.state.dice == source.state.dice
+        assert converted.state.cube_value == source.state.cube_value
+        assert converted.state.cube_owner == source.state.cube_owner
+        assert converted.state.score_x == source.state.score_x
+        assert converted.state.score_o == source.state.score_o
+        assert converted.state.match_length == source.state.match_length
+
+
+def test_changing_only_xgid_turn_keeps_checker_ownership_stable():
+    bottom_on_roll = XGID_BOTTOM
+    top_on_roll = XGID_BOTTOM.replace(":0:0:1:00:", ":0:0:-1:00:")
+    bottom = parse_analysis_identifier(bottom_on_roll)
+    top = parse_analysis_identifier(top_on_roll)
+    assert bottom.canonical_position == top.canonical_position
+    assert bottom.state.on_roll == "player_o"
+    assert top.state.on_roll == "player_x"
+
+    bottom_gnu = to_sage_request(bottom_on_roll, "cube").engine_identifier
+    top_gnu = to_sage_request(top_on_roll, "cube").engine_identifier
+    assert bottom_gnu != top_gnu
+    assert parse_analysis_identifier(bottom_gnu).canonical_position == bottom.canonical_position
+    assert parse_analysis_identifier(top_gnu).canonical_position == top.canonical_position
+    assert parse_analysis_identifier(bottom_gnu).state.on_roll == "player_o"
+    assert parse_analysis_identifier(top_gnu).state.on_roll == "player_x"
+
+
+@pytest.mark.parametrize(
+    "raw_xgid",
+    [
+        XGID_BOTTOM,
+        AUTHENTIC_XGID_TOP,
+        MATCH_7_ASYMMETRIC_XGID,
+        CUBE_OWNED_O_XGID,
+        CUBE_OWNED_X_XGID,
+    ],
+)
+def test_bridge_xgid_state_matches_independent_universal_decoder(raw_xgid):
+    parsed = parse_analysis_identifier(raw_xgid)
+    decoded = decode_xgid(raw_xgid).position
+    actual = _stable_checker_ownership(parsed)
+    assert actual["player_0_points"] == decoded.board.player_0.points
+    assert actual["player_1_points"] == decoded.board.player_1.points
+    assert actual["player_0_bar"] == decoded.board.player_0.bar
+    assert actual["player_1_bar"] == decoded.board.player_1.bar
+    assert parsed.state.on_roll == {
+        "player_0": "player_x",
+        "player_1": "player_o",
+    }[decoded.state.on_roll]
+    assert parsed.state.cube_owner == {
+        "player_0": "player_x",
+        "player_1": "player_o",
+        "center": "centered",
+    }[decoded.cube.owner]
+    assert (parsed.state.score_x, parsed.state.score_o) == (
+        decoded.score.player_0,
+        decoded.score.player_1,
+    )
 
 
 def test_supported_ankigammon_position_and_xgid_parse_encode_round_trips():
@@ -482,7 +562,7 @@ def test_supported_ankigammon_position_and_xgid_parse_encode_round_trips():
     ) == XGID_CUBE
 
 
-def test_ankigammon_gnuid_encoder_defect_is_isolated_and_corrected():
+def test_bridge_gnuid_encoder_is_independent_of_ankigammon_label_bits():
     for raw_identifier, decision_type, expected_bits in (
         (CHECKER_GNUID, "checker", [6, 66]),
         (RET_003_PLAYING_CUBE_GNUID, "cube", [6, 66]),
@@ -587,7 +667,7 @@ def test_sage_request_is_canonical_reencoding_with_no_output_equivalence_claim()
     prepared = to_sage_request(XGID_BOTTOM, "cube")
     assert prepared.ready
     assert prepared.request.engine == "sage"
-    assert prepared.request.position.id == GNU_TOP
+    assert prepared.request.position.id == GNU_BOTTOM_ON_ROLL
     assert prepared.request.dice is None
     assert prepared.identifier_provenance == "canonical_conversion_from_original_xgid"
     assert prepared.conversion_applied is True

@@ -9,6 +9,27 @@ from typing import Any, Mapping
 from .models import IdentifierConversion
 
 
+class BridgePreparationUnavailable(RuntimeError):
+    """An explicit non-error status returned by the public analysis bridge."""
+
+    def __init__(
+        self,
+        status: str,
+        *,
+        missing_state: tuple[str, ...] = (),
+        unsupported_state: tuple[str, ...] = (),
+    ) -> None:
+        if status not in {"unsupported", "unavailable"}:
+            raise ValueError(f"unexpected bridge availability status: {status}")
+        self.status = status
+        self.missing_state = missing_state
+        self.unsupported_state = unsupported_state
+        super().__init__(
+            "Engine Kit public bridge could not prepare GNUID: "
+            f"status={status} missing={missing_state} unsupported={unsupported_state}"
+        )
+
+
 def _value(value: Any) -> Any:
     if hasattr(value, "value"):
         return _value(value.value)
@@ -181,10 +202,15 @@ class EngineKitResearchAdapter:
         decision = "checker" if parsed.state.dice else "cube"
         prepared = self.bek.to_gnu_request(xgid, decision)
         if not prepared.ready or not prepared.engine_identifier:
-            raise ValueError(
-                "Engine Kit public bridge could not prepare GNUID: status={} missing={} unsupported={}".format(
-                    prepared.status, prepared.missing_state, prepared.unsupported_state
+            if prepared.status in {"unsupported", "unavailable"}:
+                raise BridgePreparationUnavailable(
+                    prepared.status,
+                    missing_state=prepared.missing_state,
+                    unsupported_state=prepared.unsupported_state,
                 )
+            raise ValueError(
+                "Engine Kit public bridge returned an unexpected incomplete result: "
+                f"status={prepared.status} engine_identifier={prepared.engine_identifier!r}"
             )
         gnuid = str(prepared.engine_identifier)
         position_id, match_id = _split_gnuid(gnuid)

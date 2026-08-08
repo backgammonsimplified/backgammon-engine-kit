@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .calculator_reference import BackgammonCalculatorReference
-from .engine import EngineKitResearchAdapter
+from .engine import BridgePreparationUnavailable, EngineKitResearchAdapter
 from .evidence import split_exported_position
 from .gallery_html import e, method_card, reference_card, render_page
 from .gnu_cli import GnuBackgammonCli
@@ -266,26 +266,10 @@ def _attempt(
 ) -> dict[str, Any]:
     try:
         middle = convert(source)
-        terminal = returner(middle)
-        exact = middle == reference
-        factual = _same(middle, reference)
-        return {
-            "surface": name,
-            "label": LABELS[name],
-            "direction": direction,
-            "source": source,
-            "middle": middle,
-            "terminal": terminal,
-            "status": "ok",
-            "error": None,
-            "reference_exact": exact,
-            "reference_semantic": factual,
-            "classification": _classification(exact, factual),
-            "roundtrip_exact": terminal == source,
-            "roundtrip_semantic": _same(terminal, source),
-            "middle_diff_from_reference": _diff(reference, middle),
-            "roundtrip_diff_from_source": _diff(source, terminal),
-        }
+    except BridgePreparationUnavailable as exc:
+        classification = RESULT_CLASSIFICATIONS[3]
+        status = exc.status
+        error = f"{type(exc).__name__}: {exc}"
     except (ModuleNotFoundError, NotImplementedError) as exc:
         classification = RESULT_CLASSIFICATIONS[3]
         status = "unavailable"
@@ -294,6 +278,76 @@ def _attempt(
         classification = RESULT_CLASSIFICATIONS[4]
         status = "error"
         error = f"{type(exc).__name__}: {exc}"
+    else:
+        exact = middle == reference
+        factual = _same(middle, reference)
+        try:
+            terminal = returner(middle)
+        except BridgePreparationUnavailable as exc:
+            terminal = None
+            roundtrip_status = exc.status
+            roundtrip_error = f"{type(exc).__name__}: {exc}"
+            roundtrip_classification = RESULT_CLASSIFICATIONS[3]
+        except (ModuleNotFoundError, NotImplementedError) as exc:
+            terminal = None
+            roundtrip_status = "unavailable"
+            roundtrip_error = f"{type(exc).__name__}: {exc}"
+            roundtrip_classification = RESULT_CLASSIFICATIONS[3]
+        except Exception as exc:
+            terminal = None
+            roundtrip_status = "error"
+            roundtrip_error = f"{type(exc).__name__}: {exc}"
+            roundtrip_classification = RESULT_CLASSIFICATIONS[4]
+        else:
+            roundtrip_status = "ok"
+            roundtrip_error = None
+            roundtrip_exact = terminal == source
+            roundtrip_semantic = _same(terminal, source)
+            roundtrip_classification = _classification(
+                roundtrip_exact, roundtrip_semantic
+            )
+            return {
+                "surface": name,
+                "label": LABELS[name],
+                "direction": direction,
+                "source": source,
+                "middle": middle,
+                "terminal": terminal,
+                "status": "ok",
+                "error": None,
+                "reference_exact": exact,
+                "reference_semantic": factual,
+                "classification": _classification(exact, factual),
+                "roundtrip_status": roundtrip_status,
+                "roundtrip_error": roundtrip_error,
+                "roundtrip_classification": roundtrip_classification,
+                "roundtrip_exact": roundtrip_exact,
+                "roundtrip_semantic": roundtrip_semantic,
+                "middle_diff_from_reference": _diff(reference, middle),
+                "roundtrip_diff_from_source": _diff(source, terminal),
+            }
+
+        return {
+            "surface": name,
+            "label": LABELS[name],
+            "direction": direction,
+            "source": source,
+            "middle": middle,
+            "terminal": None,
+            "status": "ok",
+            "error": None,
+            "reference_exact": exact,
+            "reference_semantic": factual,
+            "classification": _classification(exact, factual),
+            "roundtrip_status": roundtrip_status,
+            "roundtrip_error": roundtrip_error,
+            "roundtrip_classification": roundtrip_classification,
+            "roundtrip_exact": False,
+            "roundtrip_semantic": False,
+            "middle_diff_from_reference": _diff(reference, middle),
+            "roundtrip_diff_from_source": [],
+        }
+
     return {
         "surface": name,
         "label": LABELS[name],
@@ -306,6 +360,9 @@ def _attempt(
         "reference_exact": False,
         "reference_semantic": False,
         "classification": classification,
+        "roundtrip_status": "not_attempted",
+        "roundtrip_error": None,
+        "roundtrip_classification": classification,
         "roundtrip_exact": False,
         "roundtrip_semantic": False,
         "middle_diff_from_reference": [],
@@ -522,16 +579,11 @@ def build_gallery(
                         "source": source,
                         "middle": attempt.get("middle"),
                         "terminal": attempt.get("terminal"),
+                        "status": attempt["roundtrip_status"],
+                        "error": attempt["roundtrip_error"],
                         "exact": attempt["roundtrip_exact"],
                         "semantic": attempt["roundtrip_semantic"],
-                        "classification": (
-                            _classification(
-                                attempt["roundtrip_exact"],
-                                attempt["roundtrip_semantic"],
-                            )
-                            if attempt["status"] == "ok"
-                            else attempt["classification"]
-                        ),
+                        "classification": attempt["roundtrip_classification"],
                     }
                 )
 
@@ -680,11 +732,26 @@ def build_gallery(
 
 
 def semantic_exit_code(report: dict[str, Any]) -> int:
+    hard_classifications = {
+        RESULT_CLASSIFICATIONS[2],
+        RESULT_CLASSIFICATIONS[4],
+    }
     hard = [
         comparison
         for comparison in report["comparisons"]
         if comparison["surface"] in {"native_python", "engine_kit"}
-        and not comparison["reference_semantic"]
+        and (
+            comparison["classification"] in hard_classifications
+            or comparison.get("roundtrip_classification") in hard_classifications
+            or (
+                comparison.get("status", "ok") == "ok"
+                and comparison.get("reference_semantic", True) is False
+            )
+            or (
+                comparison.get("roundtrip_status") == "ok"
+                and comparison.get("roundtrip_semantic", True) is False
+            )
+        )
     ]
     return 1 if hard else 0
 

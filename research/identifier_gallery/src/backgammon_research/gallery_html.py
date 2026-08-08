@@ -179,12 +179,19 @@ def method_card(attempt: dict[str, Any], visuals: dict[str, Any]) -> str:
     cls = "exact" if attempt["reference_exact"] else (
         "semantic_exact" if attempt["reference_semantic"] else "state_mismatch"
     )
-    rt = "exact" if attempt["roundtrip_exact"] else (
-        "semantic_exact" if attempt["roundtrip_semantic"] else "state_mismatch"
-    )
-    rt_label = "exact" if attempt["roundtrip_exact"] else (
-        "semantic" if attempt["roundtrip_semantic"] else "changed"
-    )
+    if attempt["roundtrip_status"] == "not_attempted":
+        rt = "state_mismatch"
+        rt_label = "not attempted"
+    elif attempt["roundtrip_status"] != "ok":
+        rt = "state_mismatch"
+        rt_label = attempt["roundtrip_classification"]
+    else:
+        rt = "exact" if attempt["roundtrip_exact"] else (
+            "semantic_exact" if attempt["roundtrip_semantic"] else "state_mismatch"
+        )
+        rt_label = "exact" if attempt["roundtrip_exact"] else (
+            "semantic" if attempt["roundtrip_semantic"] else "changed"
+        )
     badges = (
         f'<span class="badge {cls}">{e(attempt["classification"])}</span>'
         f'<span class="badge {rt}">round trip: {rt_label}</span>'
@@ -223,12 +230,17 @@ def method_card(attempt: dict[str, Any], visuals: dict[str, Any]) -> str:
         attempt["roundtrip_diff_from_source"],
         "Round-trip canonical state vs source",
     )
+    roundtrip_notice = (
+        f'<pre>{e(attempt["roundtrip_error"])}</pre>'
+        if attempt["roundtrip_status"] != "ok"
+        else ""
+    )
     return (
         f'<article class="method-card"><h4>{e(attempt["label"])}</h4>'
         f'<div class="status-row">{badges}</div>'
         f'{gnu_visual(gnu_id, gnu_record, gnu_label)}'
         f'{board_visual(board_id, board_record, board_label)}'
-        f'{canonical}{roundtrip}</article>'
+        f'{canonical}{roundtrip_notice}{roundtrip}</article>'
     )
 
 

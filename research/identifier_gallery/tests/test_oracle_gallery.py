@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from backgammon_research import oracle_gallery as og
@@ -14,6 +15,7 @@ from backgammon_research.calculator_reference import (
     REQUESTED_RELEASE_REF as CALCULATOR_REF,
     release_provenance_matches as calculator_provenance_matches,
 )
+from backgammon_research.engine import EngineKitResearchAdapter
 from backgammon_research.models import RESULT_CLASSIFICATIONS
 from backgammon_research.renderer import (
     EXPECTED_COMMIT as BOARD_COMMIT,
@@ -27,6 +29,8 @@ CURRENT_BOARD_SHA = "0bc70d30e458642f41d4976948e49492c2c6117c"
 CURRENT_CALCULATOR_SHA = "a385a963ed01a6eac083dae7a1b246b1c150b3eb"
 EMPTY_XGID = "XGID=--------------------------:0:0:1:00:0:0:0:0:10"
 EMPTY_GNUID = "PAAAAAAAAAAAAA:cAkAAAAAAAAE"
+CRAWFORD_XGID = "XGID=-b----E-C---eE---c-e----B-:0:0:1:00:2:6:1:7:10"
+CRAWFORD_GNUID = "4HPwATDgc/ABMA:8AngAGAAEAAE"
 
 
 def factual_state(maximum_cube: int = 1024):
@@ -64,6 +68,14 @@ class FakeSurface:
         return EMPTY_XGID
 
 
+class CrawfordSurface(FakeSurface):
+    def xgid_to_gnuid(self, value: str) -> str:
+        return CRAWFORD_GNUID
+
+    def gnuid_to_xgid(self, value: str) -> str:
+        return CRAWFORD_XGID
+
+
 class FakeCalculator:
     provenance = {
         "requested_release_ref": CALCULATOR_REF,
@@ -80,6 +92,22 @@ class FakeCalculator:
 
     def canonical_position(self, value: str):
         return factual_state()
+
+
+class CrawfordCalculator(FakeCalculator):
+    def xgid_to_gnuid(self, value: str):
+        return {
+            "input": value,
+            "gnuid": CRAWFORD_GNUID,
+            "entry_point": "xgid_to_gnuid",
+        }
+
+    def gnuid_to_xgid(self, value: str):
+        return {
+            "input": value,
+            "xgid": CRAWFORD_XGID,
+            "entry_point": "gnuid_to_xgid",
+        }
 
 
 class FakeBglab:
@@ -281,6 +309,162 @@ class GalleryContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parents[1]) as temporary:
             report, _, _, _ = self._build(Path(temporary))
         self.assertEqual(report["classifications"], list(RESULT_CLASSIFICATIONS))
+
+    def test_explicit_bridge_nonready_status_is_unsupported_not_error(self):
+        for bridge_status in ("unsupported", "unavailable"):
+            with self.subTest(status=bridge_status):
+                adapter = object.__new__(EngineKitResearchAdapter)
+                adapter.parse = lambda value: SimpleNamespace(
+                    state=SimpleNamespace(dice=None)
+                )
+                adapter.bek = SimpleNamespace(
+                    to_gnu_request=lambda value, decision: SimpleNamespace(
+                        ready=False,
+                        engine_identifier=None,
+                        status=bridge_status,
+                        missing_state=("cube_state",) if bridge_status == "unavailable" else (),
+                        unsupported_state=(
+                            ("cube_decision_illegal_during_crawford",)
+                            if bridge_status == "unsupported"
+                            else ()
+                        ),
+                    )
+                )
+                attempt = og._attempt(
+                    "engine_kit",
+                    og.XGID_DIRECTION,
+                    EMPTY_XGID,
+                    EMPTY_GNUID,
+                    adapter.xgid_to_gnuid,
+                    lambda value: EMPTY_XGID,
+                )
+                self.assertEqual(attempt["status"], bridge_status)
+                self.assertEqual(
+                    attempt["classification"], "unsupported/unavailable"
+                )
+                self.assertNotEqual(attempt["classification"], "error")
+
+    def test_unexpected_exception_remains_error(self):
+        def fail(value: str) -> str:
+            raise RuntimeError("unexpected conversion failure")
+
+        attempt = og._attempt(
+            "engine_kit",
+            og.XGID_DIRECTION,
+            EMPTY_XGID,
+            EMPTY_GNUID,
+            fail,
+            lambda value: EMPTY_XGID,
+        )
+        self.assertEqual(attempt["status"], "error")
+        self.assertEqual(attempt["classification"], "error")
+        self.assertEqual(og.semantic_exit_code({"comparisons": [attempt]}), 1)
+
+    def test_unexpected_roundtrip_exception_remains_a_semantic_error(self):
+        def fail(value: str) -> str:
+            raise RuntimeError("unexpected return conversion failure")
+
+        attempt = og._attempt(
+            "engine_kit",
+            og.GNUID_DIRECTION,
+            EMPTY_GNUID,
+            EMPTY_XGID,
+            lambda value: EMPTY_XGID,
+            fail,
+        )
+        self.assertEqual(attempt["status"], "ok")
+        self.assertEqual(attempt["middle"], EMPTY_XGID)
+        self.assertEqual(attempt["roundtrip_status"], "error")
+        self.assertEqual(attempt["roundtrip_classification"], "error")
+        self.assertEqual(og.semantic_exit_code({"comparisons": [attempt]}), 1)
+
+    def test_engine_factual_mismatch_is_a_semantic_failure(self):
+        report = {
+            "comparisons": [
+                {
+                    "surface": "engine_kit",
+                    "classification": "factual state mismatch",
+                    "roundtrip_classification": "exact agreement",
+                }
+            ]
+        }
+        self.assertEqual(og.semantic_exit_code(report), 1)
+
+    def test_engine_bridge_unsupported_alone_is_not_a_semantic_failure(self):
+        report = {
+            "comparisons": [
+                {
+                    "surface": "engine_kit",
+                    "classification": "unsupported/unavailable",
+                    "roundtrip_classification": "unsupported/unavailable",
+                }
+            ]
+        }
+        self.assertEqual(og.semantic_exit_code(report), 0)
+
+    def test_crawford_bridge_limitation_preserves_successful_first_leg(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parents[1]) as temporary:
+            root = Path(temporary)
+            cases = root / "cases.csv"
+            with cases.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle, fieldnames=["case_id", "label", "xgid", "gnuid"]
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "case_id": "crawford",
+                        "label": "Crawford game",
+                        "xgid": CRAWFORD_XGID,
+                        "gnuid": CRAWFORD_GNUID,
+                    }
+                )
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(
+                        og, "NativeSurface", lambda: CrawfordSurface("native_python")
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        og,
+                        "AnkiSurface",
+                        lambda: CrawfordSurface("ankigammon_direct"),
+                    )
+                )
+                report = og.build_gallery(
+                    cases_path=cases,
+                    output_dir=root / "out",
+                    r_library=root,
+                    calculator=CrawfordCalculator(),
+                    bglab=FakeBglab(),
+                    gnu=FakeGnu(),
+                    renderer=FakeRenderer(),
+                )
+
+        xgid_case = next(
+            case for case in report["cases"] if case["direction"] == og.XGID_DIRECTION
+        )
+        gnuid_case = next(
+            case for case in report["cases"] if case["direction"] == og.GNUID_DIRECTION
+        )
+        xgid_bridge = next(
+            method for method in xgid_case["methods"] if method["surface"] == "engine_kit"
+        )
+        gnuid_bridge = next(
+            method for method in gnuid_case["methods"] if method["surface"] == "engine_kit"
+        )
+        self.assertEqual(xgid_bridge["status"], "unsupported")
+        self.assertEqual(xgid_bridge["classification"], "unsupported/unavailable")
+        self.assertEqual(gnuid_bridge["status"], "ok")
+        self.assertEqual(gnuid_bridge["middle"], CRAWFORD_XGID)
+        self.assertTrue(gnuid_bridge["reference_exact"])
+        self.assertEqual(gnuid_bridge["roundtrip_status"], "unsupported")
+        self.assertEqual(
+            gnuid_bridge["roundtrip_classification"], "unsupported/unavailable"
+        )
+        self.assertIsNone(gnuid_bridge["terminal"])
+        self.assertEqual(og.semantic_exit_code(report), 0)
 
     def test_reference_exercises_both_calculator_directions_and_canonical_apis(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parents[1]) as temporary:

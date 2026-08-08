@@ -8,7 +8,7 @@ CASES="$RESEARCH_DIR/fixtures/cases.csv"
 OUTPUT="${ORACLE_GALLERY_OUTPUT:-$ENGINE_KIT_REPO/artifacts/oracle-identifier-comparison}"
 BGLAB_LIBRARY="${BGLAB_R_LIBRARY:-$RESEARCH_DIR/.r-library}"
 BOARD_LIBRARY="${BACKGAMMONBOARD_R_LIBRARY:-$RESEARCH_DIR/.renderer-library}"
-BOARD_COMMIT="a4ab56f712c9ecb8e8ad83782cc82d5b32d94883"
+BOARD_COMMIT="0bc70d30e458642f41d4976948e49492c2c6117c"
 BGLAB_REFRESH="${BGLAB_REFRESH:-0}"
 BOARD_REFRESH="${BACKGAMMONBOARD_REFRESH:-0}"
 
@@ -27,7 +27,7 @@ printf '\n[1/6] Engine Kit / AnkiGammon preflight\n'
 "$PYTHON" -c "import ankigammon, backgammon_engine_kit as bek; print('AnkiGammon: OK'); print('Engine Kit:', bek.__file__)"
 printf '\n[2/6] Calculator 0.2.0 reference preflight\n'
 "$RSCRIPT" --vanilla -e "if(!requireNamespace('backgammoncalculator',quietly=TRUE)) stop('backgammoncalculator is not installed'); d<-utils::packageDescription('backgammoncalculator'); v<-as.character(utils::packageVersion('backgammoncalculator')); if(v!='0.2.0') stop(paste('expected backgammoncalculator 0.2.0, found',v)); sha<-ifelse(is.null(d\$RemoteSha),'',d\$RemoteSha); if(sha!='a385a963ed01a6eac083dae7a1b246b1c150b3eb') stop(paste('unexpected Calculator RemoteSha',sha)); cat('backgammoncalculator: ',v,' RemoteSha=',sha,'\n',sep='')"
-printf '\n[3/6] Exact current backgammonboard renderer preflight\n'
+printf '\n[3/6] Current BS backgammonboard renderer preflight\n'
 "$RSCRIPT" --vanilla "$RESEARCH_DIR/scripts/install_current_backgammonboard.R" "$BOARD_LIBRARY_NATIVE" "$BOARD_COMMIT" "$BOARD_REFRESH"
 printf '\n[4/6] Current bglab diagnostic preflight\n'
 "$RSCRIPT" --vanilla "$RESEARCH_DIR/scripts/install_current_bglab.R" "$BGLAB_LIBRARY_NATIVE" "$BGLAB_REFRESH"

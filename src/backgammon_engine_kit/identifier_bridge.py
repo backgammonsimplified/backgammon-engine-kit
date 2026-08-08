@@ -855,7 +855,21 @@ def _encode_gnu_match_id(state):
     return base64.b64encode(bytes(raw)).decode("ascii").rstrip("=")
 
 
+def _encode_xgid_as_gnuid(canonical_request):
+    """Encode XGID through the canonical native stable-player codec."""
+
+    from .position_contract.native_codec import xgid_to_gnuid
+
+    return xgid_to_gnuid(
+        canonical_request.identifier.raw_identifier,
+        allow_lossy=True,
+    )
+
+
 def _encode_engine_gnuid(canonical_request):
+    if canonical_request.identifier.identifier_format == IDENTIFIER_FORMAT_XGID:
+        return _encode_xgid_as_gnuid(canonical_request)
+
     state = canonical_request.state
     position_id = _encode_gnu_position_id(
         canonical_request.identifier.canonical_position,

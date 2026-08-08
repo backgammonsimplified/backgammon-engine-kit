@@ -9,6 +9,9 @@ from unittest.mock import patch
 from backgammon_research import oracle_gallery as og
 
 
+CURRENT_BOARD_SHA = "0bc70d30e458642f41d4976948e49492c2c6117c"
+
+
 class FakeSurface:
     def __init__(self, name: str): self.name = name
     def xgid_to_gnuid(self, value: str) -> str: return "PAAAAAAAAAAAAA:cAkAAAAAAAAE"
@@ -33,9 +36,15 @@ class FakeGnu:
 
 
 class FakeRenderer:
-    provenance = {"remote_sha": "a4ab56f712c9ecb8e8ad83782cc82d5b32d94883"}
+    provenance = {
+        "remote_sha": CURRENT_BOARD_SHA,
+        "resolved_commit": CURRENT_BOARD_SHA,
+        "package_version": "0.1.1",
+        "color_preset": "bs",
+        "style_preset": "bs",
+    }
     def render(self, xgid: str, output_dir: Path, name: str):
-        return {"output": "<svg><text>current board</text></svg>", "remote_sha": self.provenance["remote_sha"]}
+        return {"output": "<svg><text>current BS board</text></svg>", **self.provenance}
 
 
 def fake_canonical(identifier: str):
@@ -51,7 +60,7 @@ class FullGalleryTests(unittest.TestCase):
         self.assertIn("both-bars-off", ids)
         self.assertIn("crawford", ids)
 
-    def test_full_gallery_restores_discussed_layout(self):
+    def test_full_gallery_restores_three_column_visual_contract(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             cases = root / "cases.csv"
@@ -62,13 +71,42 @@ class FullGalleryTests(unittest.TestCase):
             with patch.object(og, "NativeSurface", lambda: FakeSurface("native_python")), patch.object(og, "BridgeSurface", lambda: FakeSurface("engine_kit")), patch.object(og, "AnkiSurface", lambda: FakeSurface("ankigammon_direct")), patch.object(og, "_canonical", fake_canonical), patch.object(og, "_bek", lambda: type("B", (), {"__file__": __file__})()):
                 report = og.build_gallery(cases_path=cases, output_dir=root / "out", r_library=root, calculator=FakeCalculator(), bglab=FakeBglab(), gnu=FakeGnu(), renderer=FakeRenderer())
             page = (root / "out" / "oracle-gallery.html").read_text(encoding="utf-8")
-            for marker in ["Reference: backgammoncalculator 0.2.0", "XGID → GNUID → XGID", "GNUID → XGID → GNUID", "Native Python", "Engine Kit public API", "Direct AnkiGammon", "Diagnostic: R bglab", "current board"]:
+            for marker in [
+                "Reference: backgammoncalculator 0.2.0",
+                "XGID → GNUID → XGID",
+                "GNUID → XGID → GNUID",
+                "Native Python",
+                "Engine Kit public API",
+                "Direct AnkiGammon",
+                "Diagnostic: R bglab",
+                "current BS board",
+                'data-layout="three-method-columns"',
+                "GNU CLI render of method GNUID",
+                "backgammonboard round-trip XGID",
+                "Canonical representation",
+                "BS colors/style",
+            ]:
                 self.assertIn(marker, page)
+            self.assertLess(page.index("GNU CLI render of method GNUID"), page.index("backgammonboard round-trip XGID"))
+            self.assertLess(page.index("backgammonboard round-trip XGID"), page.index("Canonical representation"))
             self.assertEqual(report["schema"], "stable-player-oracle-first-gallery-v3")
 
-    def test_renderer_provenance_is_exact_current_source_sha(self):
-        from backgammon_research.renderer import EXPECTED_COMMIT
-        self.assertEqual(EXPECTED_COMMIT, "a4ab56f712c9ecb8e8ad83782cc82d5b32d94883")
+    def test_renderer_provenance_is_current_bs_board_target(self):
+        from backgammon_research.renderer import (
+            COLOR_PRESET,
+            EXPECTED_COMMIT,
+            EXPECTED_VERSION,
+            PERSPECTIVE,
+            REQUIRED_PUBLIC_API,
+            STYLE_PRESET,
+        )
+        self.assertEqual(EXPECTED_COMMIT, CURRENT_BOARD_SHA)
+        self.assertEqual(EXPECTED_VERSION, "0.1.1")
+        self.assertEqual(COLOR_PRESET, "bs")
+        self.assertEqual(STYLE_PRESET, "bs")
+        self.assertEqual(PERSPECTIVE, "player_1")
+        self.assertIn("board_colors", REQUIRED_PUBLIC_API)
+        self.assertIn("board_style", REQUIRED_PUBLIC_API)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ RESEARCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENGINE_KIT_REPO="$(cd "$RESEARCH_DIR/../.." && pwd)"
 ENGINE_SRC="$ENGINE_KIT_REPO/src"
 CASES="$RESEARCH_DIR/fixtures/cases.csv"
-OUTPUT="${ORACLE_GALLERY_OUTPUT:-$ENGINE_KIT_REPO/artifacts/oracle-identifier-comparison}"
+OUTPUT="${ORACLE_GALLERY_OUTPUT-$ENGINE_KIT_REPO/artifacts/oracle-identifier-comparison}"
 BGLAB_LIBRARY="${BGLAB_R_LIBRARY:-$RESEARCH_DIR/.r-library}"
 BOARD_LIBRARY="${BACKGAMMONBOARD_R_LIBRARY:-$RESEARCH_DIR/.renderer-library}"
 CALCULATOR_REF="v0.2.0"
@@ -20,6 +20,7 @@ CALCULATOR_REFRESH="${BACKGAMMONCALCULATOR_REFRESH:-0}"
 if [[ -x "$ENGINE_KIT_REPO/.venv-native-codec/Scripts/python.exe" ]]; then PYTHON="$ENGINE_KIT_REPO/.venv-native-codec/Scripts/python.exe";
 elif [[ -x "$ENGINE_KIT_REPO/.venv/Scripts/python.exe" ]]; then PYTHON="$ENGINE_KIT_REPO/.venv/Scripts/python.exe";
 else PYTHON="$(command -v python)"; fi
+OUTPUT="$("$PYTHON" "$RESEARCH_DIR/scripts/validate_oracle_gallery_output.py" "$ENGINE_KIT_REPO" "$OUTPUT")"
 RSCRIPT="${RSCRIPT:-$(command -v Rscript 2>/dev/null || command -v Rscript.exe 2>/dev/null || true)}"
 [[ -n "$RSCRIPT" ]] || { echo "Rscript not found" >&2; exit 1; }
 native_path(){ if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }

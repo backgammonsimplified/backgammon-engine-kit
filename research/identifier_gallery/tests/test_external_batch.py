@@ -173,6 +173,24 @@ class ExternalBatchTests(unittest.TestCase):
             self.assertEqual(outcome.exit_code, 0)
             self.assertEqual(outcome.summary["counts"]["action"], {"roll": 8})
 
+    def test_classification_makes_factual_disagreement_authoritative(self):
+        self.assertEqual(
+            batch._classification(exact=True, factual=False),
+            "factual state mismatch",
+        )
+
+    def test_classification_retains_exact_factual_agreement(self):
+        self.assertEqual(
+            batch._classification(exact=True, factual=True),
+            "exact agreement",
+        )
+
+    def test_classification_retains_nonexact_factual_agreement(self):
+        self.assertEqual(
+            batch._classification(exact=False, factual=True),
+            "representational/default/normalization difference",
+        )
+
     def test_missing_required_columns_fail_clearly_and_write_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -181,6 +199,9 @@ class ExternalBatchTests(unittest.TestCase):
             outcome = batch.run_external_batch(source, root / "out", calculator_runner=FakeCalculatorRunner(), surfaces=[], progress_interval=0, repo=Path(__file__).parents[3])
             self.assertEqual(outcome.exit_code, 1)
             self.assertIn("missing required column", outcome.summary["headline"]["fatal_error"])
+            calculator = outcome.summary["provenance"]["calculator"]
+            self.assertEqual(calculator["resolved_release_commit"], "unavailable")
+            self.assertEqual(calculator["expected_release_commit"], batch.RELEASE_COMMIT)
             for name in ("summary.json", "roundtrip-results.csv", "errors.csv", "SHA256SUMS.txt"):
                 self.assertTrue((root / "out" / name).is_file(), name)
 
@@ -201,6 +222,77 @@ class ExternalBatchTests(unittest.TestCase):
             self.assertTrue((outcome.output_dir / "summary.json").is_file())
             self.assertTrue((outcome.output_dir / "roundtrip-results.csv").is_file())
 
+    def test_native_exact_identifier_cannot_mask_factual_mismatch(self):
+        root_cm, stack, outcome = self.run_batch(facts={"G-SRC-1": FACT_B})
+        with root_cm, stack:
+            with (outcome.output_dir / "roundtrip-results.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                rows = list(csv.DictReader(handle))
+            row = next(
+                item for item in rows
+                if item["surface"] == "engine_kit_native"
+                and item["direction"] == batch.XGID_DIRECTION
+            )
+            self.assertEqual(row["primary_exact_vs_calculator"], "True")
+            self.assertEqual(row["primary_factual_vs_calculator"], "False")
+            self.assertEqual(row["primary_classification"], "factual state mismatch")
+            self.assertEqual(outcome.exit_code, 1)
+
+    def test_engine_hard_failure_uses_completed_primary_factual_boolean(self):
+        for surface in ("engine_kit_native", "engine_kit_public"):
+            with self.subTest(surface=surface):
+                detail = batch._empty_detail(
+                    surface, batch.XGID_DIRECTION, "source", "paired",
+                    ("roll", "neither", "money"),
+                )
+                detail.update(
+                    primary_conversion_status="ok",
+                    primary_exact_vs_calculator=True,
+                    primary_factual_vs_calculator=False,
+                    primary_classification="exact agreement",
+                    round_trip_status="not_attempted",
+                    round_trip_classification="unsupported/unavailable",
+                )
+                self.assertTrue(batch._hard_failure(detail))
+
+    def test_engine_hard_failure_uses_completed_round_trip_factual_boolean(self):
+        for surface in ("engine_kit_native", "engine_kit_public"):
+            with self.subTest(surface=surface):
+                detail = batch._empty_detail(
+                    surface, batch.XGID_DIRECTION, "source", "paired",
+                    ("roll", "neither", "money"),
+                )
+                detail.update(
+                    primary_conversion_status="ok",
+                    primary_exact_vs_calculator=True,
+                    primary_factual_vs_calculator=True,
+                    primary_classification="exact agreement",
+                    round_trip_status="ok",
+                    round_trip_exact_vs_source=True,
+                    round_trip_factual_vs_source=False,
+                    round_trip_classification="exact agreement",
+                )
+                self.assertTrue(batch._hard_failure(detail))
+
+    def test_public_supported_exact_identifier_cannot_mask_factual_mismatch(self):
+        root_cm, stack, outcome = self.run_batch(facts={"G-SRC-1": FACT_B})
+        with root_cm, stack:
+            with (outcome.output_dir / "roundtrip-results.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                rows = list(csv.DictReader(handle))
+            row = next(
+                item for item in rows
+                if item["surface"] == "engine_kit_public"
+                and item["direction"] == batch.XGID_DIRECTION
+            )
+            self.assertEqual(row["primary_conversion_status"], "ok")
+            self.assertEqual(row["primary_exact_vs_calculator"], "True")
+            self.assertEqual(row["primary_factual_vs_calculator"], "False")
+            self.assertEqual(row["primary_classification"], "factual state mismatch")
+            self.assertEqual(outcome.exit_code, 1)
+
     def test_public_explicit_unsupported_is_not_hard_failure(self):
         _, g_to_x = normal_methods()
         def unsupported(value):
@@ -210,6 +302,17 @@ class ExternalBatchTests(unittest.TestCase):
         with root_cm, stack:
             self.assertEqual(outcome.exit_code, 0)
             self.assertGreater(outcome.summary["headline"]["public_bridge_unsupported_unavailable"], 0)
+            unsupported_detail = batch._empty_detail(
+                "engine_kit_public", batch.XGID_DIRECTION, "source", "paired",
+                ("double", "neither", "match"),
+            )
+            unsupported_detail.update(
+                primary_conversion_status="unsupported",
+                primary_classification="unsupported/unavailable",
+                round_trip_status="not_attempted",
+                round_trip_classification="unsupported/unavailable",
+            )
+            self.assertFalse(batch._hard_failure(unsupported_detail))
 
     def test_public_genuine_error_is_hard_failure(self):
         _, g_to_x = normal_methods()
@@ -220,6 +323,19 @@ class ExternalBatchTests(unittest.TestCase):
         with root_cm, stack:
             self.assertEqual(outcome.exit_code, 1)
             self.assertGreater(outcome.summary["headline"]["engine_kit_public_hard_failures"], 0)
+
+    def test_calculator_error_remains_a_hard_failure(self):
+        detail = batch._empty_detail(
+            "calculator_v0_2_0", batch.XGID_DIRECTION, "source", "paired",
+            ("roll", "neither", "money"),
+        )
+        detail.update(
+            primary_conversion_status="error",
+            primary_classification="error",
+            round_trip_status="not_attempted",
+            round_trip_classification="error",
+        )
+        self.assertTrue(batch._hard_failure(detail))
 
     def test_successful_primary_plus_unsupported_return_preserves_middle(self):
         def unsupported_return(value):
@@ -239,6 +355,7 @@ class ExternalBatchTests(unittest.TestCase):
             self.assertEqual(row["surface_middle_identifier"], "XGID=SRC-1")
             self.assertEqual(row["round_trip_status"], "unavailable")
             self.assertEqual(row["round_trip_classification"], "unsupported/unavailable")
+            self.assertEqual(row["round_trip_factual_vs_source"], "False")
             self.assertEqual(outcome.exit_code, 0)
 
     def test_direct_anki_mismatch_visible_but_not_hard(self):
@@ -249,6 +366,43 @@ class ExternalBatchTests(unittest.TestCase):
             self.assertEqual(outcome.exit_code, 0)
             self.assertGreater(outcome.summary["headline"]["direct_ankigammon_factual_mismatches"], 0)
             self.assertGreater((outcome.output_dir / "mismatches.csv").stat().st_size, 100)
+
+    def test_direct_anki_exact_identifier_factual_mismatch_is_diagnostic_only(self):
+        _, g_to_x = normal_methods()
+        x_to_g, _ = normal_methods()
+        good = batch.Surface(
+            "engine_kit_native", lambda value: "G-GOOD", g_to_x
+        )
+        public = batch.Surface(
+            "engine_kit_public", lambda value: "G-GOOD", g_to_x,
+            public_bridge=True,
+        )
+        anki = batch.Surface("ankigammon_direct", x_to_g, g_to_x)
+        root_cm, stack, outcome = self.run_batch(
+            native=good,
+            public=public,
+            anki=anki,
+            facts={"G-GOOD": FACT_A, "G-SRC-1": FACT_B},
+        )
+        with root_cm, stack:
+            with (outcome.output_dir / "roundtrip-results.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                rows = list(csv.DictReader(handle))
+            row = next(
+                item for item in rows
+                if item["surface"] == "ankigammon_direct"
+                and item["direction"] == batch.XGID_DIRECTION
+            )
+            self.assertEqual(row["primary_exact_vs_calculator"], "True")
+            self.assertEqual(row["primary_factual_vs_calculator"], "False")
+            self.assertEqual(row["primary_classification"], "factual state mismatch")
+            self.assertFalse(
+                batch._hard_failure(
+                    {**row, "primary_factual_vs_calculator": False}
+                )
+            )
+            self.assertEqual(outcome.exit_code, 0)
 
     def test_representational_normalization_is_not_hard(self):
         _, g_to_x = normal_methods()

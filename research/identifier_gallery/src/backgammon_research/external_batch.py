@@ -324,11 +324,11 @@ def _compare_facts(
 
 
 def _classification(exact: bool, factual: bool) -> str:
+    if not factual:
+        return RESULT_CLASSIFICATIONS[2]
     if exact:
         return RESULT_CLASSIFICATIONS[0]
-    if factual:
-        return RESULT_CLASSIFICATIONS[1]
-    return RESULT_CLASSIFICATIONS[2]
+    return RESULT_CLASSIFICATIONS[1]
 
 
 def _source_dimensions(row: Mapping[str, str]) -> tuple[str, str, str]:
@@ -628,6 +628,19 @@ def _hard_failure(detail: Mapping[str, Any]) -> bool:
     if surface == "calculator_v0_2_0":
         return primary == RESULT_CLASSIFICATIONS[4] or roundtrip == RESULT_CLASSIFICATIONS[4]
     if surface in {"engine_kit_native", "engine_kit_public"}:
+        comparison_results = set(RESULT_CLASSIFICATIONS[:3])
+        primary_factual_completed = (
+            detail["primary_conversion_status"] == "ok"
+            and primary in comparison_results
+        )
+        roundtrip_factual_completed = (
+            detail["round_trip_status"] == "ok"
+            and roundtrip in comparison_results
+        )
+        if primary_factual_completed and detail["primary_factual_vs_calculator"] is False:
+            return True
+        if roundtrip_factual_completed and detail["round_trip_factual_vs_source"] is False:
+            return True
         if primary in {RESULT_CLASSIFICATIONS[2], RESULT_CLASSIFICATIONS[4]}:
             return True
         if detail["round_trip_status"] == "ok" and roundtrip == RESULT_CLASSIFICATIONS[2]:
@@ -914,7 +927,8 @@ def run_external_batch(
                 "package_version": EXPECTED_VERSION,
                 "github_repository": GITHUB_REPOSITORY,
                 "requested_release_ref": REQUESTED_RELEASE_REF,
-                "resolved_release_commit": RELEASE_COMMIT,
+                "expected_release_commit": RELEASE_COMMIT,
+                "resolved_release_commit": "unavailable",
             },
             "python_executable": sys.executable,
             "ankigammon": metadata["ankigammon"],

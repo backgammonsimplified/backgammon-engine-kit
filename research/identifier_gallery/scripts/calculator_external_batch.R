@@ -31,21 +31,27 @@ remote_sha <- description_value("RemoteSha")
 remote_ref <- description_value("RemoteRef")
 github_sha1 <- description_value("GithubSHA1")
 github_ref <- description_value("GithubRef")
-provenance_ok <- expected_commit %in% c(remote_sha, github_sha1) ||
-  requested_ref %in% c(remote_ref, github_ref)
-if (!provenance_ok) {
+sha_metadata <- unique(Filter(nzchar, c(remote_sha, github_sha1)))
+if (length(sha_metadata) == 0) {
+  stop(sprintf(
+    "Calculator provenance lacks immutable commit metadata: expected %s at %s; RemoteRef=%s GithubRef=%s",
+    requested_ref, expected_commit, remote_ref, github_ref
+  ))
+}
+if (length(sha_metadata) != 1 || !identical(sha_metadata[[1]], expected_commit)) {
   stop(sprintf(
     "Calculator provenance mismatch: expected %s at %s; RemoteSha=%s RemoteRef=%s GithubSHA1=%s GithubRef=%s",
     requested_ref, expected_commit, remote_sha, remote_ref, github_sha1, github_ref
   ))
 }
+resolved_sha <- sha_metadata[[1]]
 
 provenance <- data.frame(
   package = package_name,
   package_version = version,
   github_repository = "backgammonsimplified/backgammoncalculator",
   requested_release_ref = requested_ref,
-  resolved_release_commit = expected_commit,
+  resolved_release_commit = resolved_sha,
   remote_sha = remote_sha,
   remote_ref = remote_ref,
   github_sha1 = github_sha1,

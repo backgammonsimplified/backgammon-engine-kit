@@ -5,6 +5,7 @@ import base64
 import pytest
 
 from backgammon_engine_kit.position_contract import (
+    ContractValidationError,
     NativeIdentifierCodecError,
     convert_gnuid_to_xgid,
     convert_xgid_to_gnuid,
@@ -199,6 +200,30 @@ def test_pending_double_turn_is_doubler_and_decision_owner_is_responder(
     assert reparsed.cube.pending_action.offerer == dice_owner
     assert reparsed.cube.pending_action.responder == turn_owner
     assert gnuid_to_xgid(gnuid) == xgid
+
+
+def test_owned_pending_double_with_matching_cube_owner_and_turn_is_valid():
+    source = position_from_xgid(
+        "XGID=-b----E-C---eE---c-e----B-:1:-1:-1:D:1:3:0:7:10"
+    )
+    assert source.cube.owner == source.state.on_roll
+    assert source.cube.pending_action.offerer == source.state.on_roll
+
+
+def test_owned_pending_double_with_opposing_cube_owner_and_turn_is_rejected():
+    with pytest.raises(ContractValidationError, match="cube access"):
+        position_from_xgid(
+            "XGID=-b----E-C---eE---c-e----B-:1:-1:1:D:1:3:0:7:10"
+        )
+
+
+def test_centered_pending_double_is_valid():
+    source = position_from_xgid(
+        "XGID=-b----E-C---eE---c-e----B-:1:0:1:D:1:3:0:7:10"
+    )
+    assert source.cube.owner == "center"
+    assert source.cube.pending_action.offerer == source.state.on_roll
+
 
 def test_beaver_and_raccoon_are_rejected_by_strict_gnu_encoding():
     board = "-A-B--A---------------d---"

@@ -1,6 +1,6 @@
 # Backgammon Engine Kit
 
-Backgammon Engine Kit is a private, pre-release Python package for bounded,
+Backgammon Engine Kit is a Python package for bounded,
 engine-neutral backgammon position contracts and analysis requests:
 
 ```text

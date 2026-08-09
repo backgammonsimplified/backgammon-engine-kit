@@ -3,8 +3,11 @@ include pyproject.toml
 include setup.cfg
 include setup.py
 recursive-include src *.json
-recursive-include tests *.py
-recursive-include docs *.md
-recursive-include fixtures *
-recursive-include evidence *
-recursive-include scripts *.py
+prune docs
+prune evidence
+prune fixtures
+prune research
+prune scripts
+prune tests
+global-exclude *.py[cod]
+global-exclude __pycache__

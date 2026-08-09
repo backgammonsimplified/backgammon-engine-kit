@@ -20,10 +20,10 @@ dependency. This identifier-bridge change was tested on Python 3.10 and probed
 on Python 3.12.8; it does not claim testing on every supported Python version.
 
 ```bash
-python -m pip install .
+python -m pip install backgammon-engine-kit
 ```
 
-For development:
+For development from a source checkout:
 
 ```bash
 python -m pip install -e .
@@ -46,7 +46,7 @@ print(source.schema_version)    # position-source-v1
 ```
 
 The XGID and GNU combined-ID decoders have intentionally bounded support. See
-the [support matrix](docs/architecture/UNIVERSAL_POSITION_V1_SUPPORT_MATRIX.md)
+the [support matrix](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/master/docs/architecture/UNIVERSAL_POSITION_V1_SUPPORT_MATRIX.md)
 for represented, external-context, and unsupported state.
 
 ## Identifier-to-request bridge
@@ -77,7 +77,7 @@ These calls only prepare `AnalysisRequest` values. They do not execute an
 engine or claim that GNU and Sage outputs are semantically equivalent. A lone
 Position ID returns `status="unavailable"` until its missing turn, dice, cube,
 score, and match state are explicitly supplied. See the committed
-[Node-consumption example](examples/node_identifier_bridge.py).
+[Node-consumption example](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/master/examples/node_identifier_bridge.py).
 
 ## Renderer Position
 
@@ -107,7 +107,7 @@ backgammon-engine-kit render-gnuid \
 
 Successful renderer commands emit only deterministic envelope JSON. They do not
 invoke GNU Backgammon or Sage and do not render SVG or another board image. See
-the [Renderer Position interface](docs/architecture/RENDERER_POSITION_INTERFACE.md)
+the [Renderer Position interface](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/master/docs/architecture/RENDERER_POSITION_INTERFACE.md)
 for Python signatures, view defaults, orientation, unknown facts, and CLI
 failure behavior.
 
@@ -130,5 +130,5 @@ The repository retains checksum-controlled GNU and Sage evidence under
 the package and its JSON schemas, not tests, evidence, fixtures, or developer
 scripts.
 
-See [Architecture](docs/architecture/README.md) and
-[fixtures/README.md](fixtures/README.md) for the contract and evidence policy.
+See [Architecture](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/master/docs/architecture/README.md) and
+[the fixtures overview](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/master/fixtures/README.md) for the contract and evidence policy.

@@ -1,0 +1,696 @@
+{
+  "fixture_schema_version": "cross-format-parity-fixture-v1",
+  "fixture_id": "position-a",
+  "scope": {
+    "opening_roll": "Excluded. The position begins after the opening roll has resolved."
+  },
+  "authoritative_evidence": {
+    "manual_rotation_performed": false,
+    "gnu_desktop_screenshot_supplied": true,
+    "gnu_adapter_runtime_scope": "GNU Backgammon 1.08.003"
+  },
+  "sources": {
+    "xgid": {
+      "schema_version": "position-source-v1",
+      "position_schema_version": "universal-position-v1",
+      "format": "xgid",
+      "profile": "xgid-v1",
+      "raw_source": {
+        "kind": "text",
+        "value": "XGID=-A-B--A---------------d---:0:0:1:00:0:0:0:0:10",
+        "media_type": "text/plain"
+      },
+      "parser": {
+        "name": "bms-xgid-adapter-v1",
+        "version": "1.0.0-candidate",
+        "runtime_version": null
+      },
+      "player_mapping": {
+        "top": "player_0",
+        "bottom": "player_1"
+      },
+      "source_view_available": true,
+      "field_origins": {
+        "/board": {
+          "status": "represented_directly"
+        },
+        "/state/game_state": {
+          "status": "derived"
+        },
+        "/state/on_roll": {
+          "status": "represented_directly"
+        },
+        "/state/decision_player": {
+          "status": "derived",
+          "note": "No response is pending, so decision_player equals on_roll."
+        },
+        "/state/phase": {
+          "status": "derived"
+        },
+        "/state/decision_type": {
+          "status": "derived",
+          "note": "Derived after source decode and external cube-enabled context are combined."
+        },
+        "/state/dice": {
+          "status": "represented_directly"
+        },
+        "/cube/enabled": {
+          "status": "supplied_externally",
+          "note": "XGID has cube value and owner fields but no explicit NoCube or cube-enabled field."
+        },
+        "/cube/value": {
+          "status": "represented_directly"
+        },
+        "/cube/owner": {
+          "status": "represented_directly"
+        },
+        "/cube/pending_action": {
+          "status": "derived"
+        },
+        "/score": {
+          "status": "represented_directly"
+        },
+        "/rules/crawford": {
+          "status": "derived",
+          "note": "Match length 0 selects unlimited-game interpretation."
+        },
+        "/rules/jacoby": {
+          "status": "represented_directly"
+        },
+        "/rules/beavers": {
+          "status": "represented_directly"
+        },
+        "/rules/raccoons": {
+          "status": "not_represented"
+        },
+        "/rules/automatic_doubles": {
+          "status": "supplied_externally"
+        },
+        "/rules/variation": {
+          "status": "supplied_externally"
+        },
+        "/rules/maximum_cube": {
+          "status": "represented_directly"
+        }
+      },
+      "external_settings": {
+        "cube": {
+          "enabled": true
+        },
+        "rules": {
+          "variation": "standard",
+          "automatic_doubles": 0
+        }
+      },
+      "assumptions": [],
+      "warnings": [],
+      "conversion_losses": [
+        {
+          "field": "/cube/enabled",
+          "reason": "XGID does not explicitly distinguish cubeful from NoCube evaluation.",
+          "severity": "warning"
+        },
+        {
+          "field": "/rules/raccoons",
+          "reason": "The XGID rules field represents Jacoby and beaver settings, not raccoon permission.",
+          "severity": "warning"
+        },
+        {
+          "field": "/rules/automatic_doubles",
+          "reason": "XGID does not represent automatic-double settings.",
+          "severity": "warning"
+        },
+        {
+          "field": "/rules/variation",
+          "reason": "XGID does not identify the variation.",
+          "severity": "warning"
+        }
+      ],
+      "source_hash": "cf9fd55a0dd9895cce8a56d2aefe64d2f042e91b792877b1707e4b3be80d9d13"
+    },
+    "gnuid": {
+      "schema_version": "position-source-v1",
+      "position_schema_version": "universal-position-v1",
+      "format": "gnuid",
+      "profile": "gnubg-1.08.003-combined-id",
+      "raw_source": {
+        "kind": "text",
+        "value": "PAAAICMAAAAAAA:cAkAAAAAAAAE",
+        "media_type": "text/plain"
+      },
+      "parser": {
+        "name": "bms-gnuid-adapter-v1",
+        "version": "1.0.0-candidate",
+        "runtime_version": "GNU Backgammon 1.08.003"
+      },
+      "player_mapping": {
+        "gnu_player_0": "player_0",
+        "gnu_player_1": "player_1"
+      },
+      "source_view_available": false,
+      "field_origins": {
+        "/board": {
+          "status": "represented_directly",
+          "source_path": "Position ID"
+        },
+        "/state/game_state": {
+          "status": "represented_directly",
+          "source_path": "Match ID"
+        },
+        "/state/on_roll": {
+          "status": "represented_directly",
+          "source_path": "Match ID DiceOwner"
+        },
+        "/state/decision_player": {
+          "status": "represented_directly",
+          "source_path": "Match ID TurnOwner"
+        },
+        "/state/phase": {
+          "status": "derived"
+        },
+        "/state/decision_type": {
+          "status": "derived",
+          "note": "Derived after source decode and external rule context are combined."
+        },
+        "/state/dice": {
+          "status": "represented_directly",
+          "source_path": "Match ID dice"
+        },
+        "/cube/enabled": {
+          "status": "supplied_externally"
+        },
+        "/cube/value": {
+          "status": "represented_directly",
+          "source_path": "Match ID cube exponent"
+        },
+        "/cube/owner": {
+          "status": "represented_directly",
+          "source_path": "Match ID cube owner"
+        },
+        "/cube/pending_action": {
+          "status": "represented_directly",
+          "source_path": "Match ID doubled and resignation fields"
+        },
+        "/score": {
+          "status": "represented_directly",
+          "source_path": "Match ID"
+        },
+        "/rules/crawford": {
+          "status": "represented_directly",
+          "source_path": "Match ID Crawford bit"
+        },
+        "/rules/jacoby": {
+          "status": "supplied_externally"
+        },
+        "/rules/beavers": {
+          "status": "supplied_externally"
+        },
+        "/rules/raccoons": {
+          "status": "not_represented"
+        },
+        "/rules/automatic_doubles": {
+          "status": "supplied_externally"
+        },
+        "/rules/variation": {
+          "status": "supplied_externally"
+        },
+        "/rules/maximum_cube": {
+          "status": "supplied_externally"
+        }
+      },
+      "external_settings": {
+        "cube": {
+          "enabled": true
+        },
+        "rules": {
+          "variation": "standard",
+          "jacoby": false,
+          "beavers": false,
+          "automatic_doubles": 0,
+          "maximum_cube": 1024
+        }
+      },
+      "assumptions": [],
+      "warnings": [],
+      "conversion_losses": [
+        {
+          "field": "/cube/enabled",
+          "reason": "The combined GNU ID does not establish cubeful versus NoCube evaluation.",
+          "severity": "warning"
+        },
+        {
+          "field": "/rules/jacoby",
+          "reason": "Combined GNU ID does not represent Jacoby.",
+          "severity": "warning"
+        },
+        {
+          "field": "/rules/beavers",
+          "reason": "Combined GNU ID does not represent beavers.",
+          "severity": "warning"
+        },
+        {
+          "field": "/rules/raccoons",
+          "reason": "Combined GNU ID does not represent raccoons.",
+          "severity": "warning"
+        },
+        {
+          "field": "/rules/automatic_doubles",
+          "reason": "Combined GNU ID does not represent automatic doubles.",
+          "severity": "warning"
+        },
+        {
+          "field": "/rules/variation",
+          "reason": "Combined GNU ID does not identify the variation.",
+          "severity": "warning"
+        },
+        {
+          "field": "/rules/maximum_cube",
+          "reason": "Combined GNU ID does not represent maximum cube.",
+          "severity": "warning"
+        },
+        {
+          "field": "/view",
+          "reason": "The IDs do not establish an arbitrary original GNU Desktop GUI rotation.",
+          "severity": "informational"
+        }
+      ],
+      "source_hash": "a29634a7c39b2474cec22b1a88172558c33f86adfb837993e3844e91e130bf5c"
+    }
+  },
+  "expected_raw_decode": {
+    "xgid": {
+      "schema_version": "universal-position-v1",
+      "players": [
+        "player_0",
+        "player_1"
+      ],
+      "board": {
+        "coordinate_system": "self_relative_points",
+        "checker_count": {
+          "player_0": 15,
+          "player_1": 15
+        },
+        "player_0": {
+          "points": [
+            0,
+            0,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "bar": 0,
+          "off": 11
+        },
+        "player_1": {
+          "points": [
+            1,
+            0,
+            2,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "bar": 0,
+          "off": 11
+        }
+      },
+      "state": {
+        "game_state": "playing",
+        "on_roll": "player_1",
+        "decision_player": "player_1",
+        "phase": "pre_roll",
+        "decision_type": "unknown",
+        "dice": null
+      },
+      "cube": {
+        "enabled": null,
+        "value": 1,
+        "owner": "center",
+        "pending_action": {
+          "type": "none",
+          "offerer": null,
+          "responder": null,
+          "offered_cube_value": null,
+          "resignation_multiplier": null
+        }
+      },
+      "score": {
+        "player_0": 0,
+        "player_1": 0,
+        "match_length": 0
+      },
+      "rules": {
+        "variation": null,
+        "crawford": false,
+        "jacoby": false,
+        "beavers": false,
+        "raccoons": null,
+        "automatic_doubles": null,
+        "maximum_cube": 1024
+      }
+    },
+    "gnuid": {
+      "schema_version": "universal-position-v1",
+      "players": [
+        "player_0",
+        "player_1"
+      ],
+      "board": {
+        "coordinate_system": "self_relative_points",
+        "checker_count": {
+          "player_0": 15,
+          "player_1": 15
+        },
+        "player_0": {
+          "points": [
+            0,
+            0,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "bar": 0,
+          "off": 11
+        },
+        "player_1": {
+          "points": [
+            1,
+            0,
+            2,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "bar": 0,
+          "off": 11
+        }
+      },
+      "state": {
+        "game_state": "playing",
+        "on_roll": "player_1",
+        "decision_player": "player_1",
+        "phase": "pre_roll",
+        "decision_type": "unknown",
+        "dice": null
+      },
+      "cube": {
+        "enabled": null,
+        "value": 1,
+        "owner": "center",
+        "pending_action": {
+          "type": "none",
+          "offerer": null,
+          "responder": null,
+          "offered_cube_value": null,
+          "resignation_multiplier": null
+        }
+      },
+      "score": {
+        "player_0": 0,
+        "player_1": 0,
+        "match_length": 0
+      },
+      "rules": {
+        "variation": null,
+        "crawford": false,
+        "jacoby": null,
+        "beavers": null,
+        "raccoons": null,
+        "automatic_doubles": null,
+        "maximum_cube": null
+      }
+    }
+  },
+  "expected_enriched_position": {
+    "schema_version": "universal-position-v1",
+    "players": [
+      "player_0",
+      "player_1"
+    ],
+    "board": {
+      "coordinate_system": "self_relative_points",
+      "checker_count": {
+        "player_0": 15,
+        "player_1": 15
+      },
+      "player_0": {
+        "points": [
+          0,
+          0,
+          4,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "bar": 0,
+        "off": 11
+      },
+      "player_1": {
+        "points": [
+          1,
+          0,
+          2,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "bar": 0,
+        "off": 11
+      }
+    },
+    "state": {
+      "game_state": "playing",
+      "on_roll": "player_1",
+      "decision_player": "player_1",
+      "phase": "pre_roll",
+      "decision_type": "roll_or_double",
+      "dice": null
+    },
+    "cube": {
+      "enabled": true,
+      "value": 1,
+      "owner": "center",
+      "pending_action": {
+        "type": "none",
+        "offerer": null,
+        "responder": null,
+        "offered_cube_value": null,
+        "resignation_multiplier": null
+      }
+    },
+    "score": {
+      "player_0": 0,
+      "player_1": 0,
+      "match_length": 0
+    },
+    "rules": {
+      "variation": "standard",
+      "crawford": false,
+      "jacoby": false,
+      "beavers": false,
+      "raccoons": null,
+      "automatic_doubles": 0,
+      "maximum_cube": 1024
+    }
+  },
+  "expected_views": {
+    "xgid_source_view": {
+      "schema_version": "backgammon-view-v1",
+      "top_player": "player_0",
+      "bottom_player": "player_1",
+      "point_labels_for": "player_1",
+      "bottom_home_board_side": "right",
+      "cube_display_side": "left",
+      "rotation": "source",
+      "view_origin": "source"
+    },
+    "verified_gnu_desktop_view": {
+      "schema_version": "backgammon-view-v1",
+      "top_player": "player_0",
+      "bottom_player": "player_1",
+      "point_labels_for": "player_1",
+      "bottom_home_board_side": "right",
+      "cube_display_side": "left",
+      "rotation": "custom",
+      "view_origin": "external"
+    }
+  },
+  "expected_point_labels_left_to_right": {
+    "top": [
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24
+    ],
+    "bottom": [
+      12,
+      11,
+      10,
+      9,
+      8,
+      7,
+      6,
+      5,
+      4,
+      3,
+      2,
+      1
+    ]
+  },
+  "parity": {
+    "compare_raw_shared_fields": [
+      "/board",
+      "/state/game_state",
+      "/state/on_roll",
+      "/state/decision_player",
+      "/state/phase",
+      "/state/decision_type",
+      "/state/dice",
+      "/cube/enabled",
+      "/cube/value",
+      "/cube/owner",
+      "/cube/pending_action",
+      "/score",
+      "/rules/crawford",
+      "/rules/raccoons",
+      "/rules/automatic_doubles",
+      "/rules/variation"
+    ],
+    "raw_null_requirements": {
+      "xgid": [
+        "/cube/enabled",
+        "/rules/raccoons",
+        "/rules/automatic_doubles",
+        "/rules/variation"
+      ],
+      "gnuid": [
+        "/cube/enabled",
+        "/rules/jacoby",
+        "/rules/beavers",
+        "/rules/raccoons",
+        "/rules/automatic_doubles",
+        "/rules/variation",
+        "/rules/maximum_cube"
+      ]
+    },
+    "expected_result": "pass"
+  }
+}

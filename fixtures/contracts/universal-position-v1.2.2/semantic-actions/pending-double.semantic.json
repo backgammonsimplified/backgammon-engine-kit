@@ -1,0 +1,113 @@
+{
+  "fixture_schema_version": "semantic-action-fixture-v1",
+  "fixture_id": "pending-double-beaver-available",
+  "position": {
+    "schema_version": "universal-position-v1",
+    "players": [
+      "player_0",
+      "player_1"
+    ],
+    "board": {
+      "coordinate_system": "self_relative_points",
+      "checker_count": {
+        "player_0": 15,
+        "player_1": 15
+      },
+      "player_0": {
+        "points": [
+          0,
+          0,
+          4,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "bar": 0,
+        "off": 11
+      },
+      "player_1": {
+        "points": [
+          1,
+          0,
+          2,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "bar": 0,
+        "off": 11
+      }
+    },
+    "state": {
+      "game_state": "playing",
+      "on_roll": "player_0",
+      "decision_player": "player_1",
+      "phase": "cube_response",
+      "decision_type": "take_drop_or_beaver",
+      "dice": null
+    },
+    "cube": {
+      "enabled": true,
+      "value": 1,
+      "owner": "center",
+      "pending_action": {
+        "type": "double",
+        "offerer": "player_0",
+        "responder": "player_1",
+        "offered_cube_value": 2,
+        "resignation_multiplier": null
+      }
+    },
+    "score": {
+      "player_0": 0,
+      "player_1": 0,
+      "match_length": 0
+    },
+    "rules": {
+      "variation": "standard",
+      "crawford": false,
+      "jacoby": false,
+      "beavers": true,
+      "raccoons": true,
+      "automatic_doubles": 0,
+      "maximum_cube": 8
+    }
+  },
+  "rationale": "The doubled player may take, drop, or beaver because beavers are enabled and maximum cube permits the immediate redouble."
+}

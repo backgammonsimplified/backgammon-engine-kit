@@ -1,0 +1,29 @@
+{
+  "schema_version": "engine-evidence-manifest-v1",
+  "artifacts": [
+    {
+      "artifact": "gnu-checker-position-transcript-1ply",
+      "status": "verified",
+      "path": "evidence/gnu/1.08.003/checker-1ply"
+    },
+    {
+      "artifact": "gnu-cube-position-transcript-1ply",
+      "status": "verified",
+      "path": "evidence/gnu/1.08.003/cube-1ply"
+    },
+    {
+      "artifact": "sage-checker-position-artifact-1ply",
+      "status": "verified",
+      "path": "evidence/sage/1.2.20260706/checker-1ply"
+    },
+    {
+      "artifact": "sage-cube-position-artifact-1ply",
+      "status": "verified",
+      "path": "evidence/sage/1.2.20260706/cube-1ply"
+    },
+    {
+      "artifact": "sage-rollout-artifact-with-provenance",
+      "status": "missing"
+    }
+  ]
+}

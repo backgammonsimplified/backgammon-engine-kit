@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://backgammonmadesimple.org/schemas/backgammon-view-v1.schema.json",
+  "title": "Backgammon View v1 Candidate, cleanup revision 1.2.2",
+  "description": "Display roles and physical board layout only. Stable player identities remain player_0 and player_1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "top_player",
+    "bottom_player",
+    "point_labels_for",
+    "bottom_home_board_side",
+    "cube_display_side",
+    "rotation",
+    "view_origin"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "backgammon-view-v1"
+    },
+    "top_player": {
+      "type": "string",
+      "enum": [
+        "player_0",
+        "player_1"
+      ]
+    },
+    "bottom_player": {
+      "type": "string",
+      "enum": [
+        "player_0",
+        "player_1"
+      ]
+    },
+    "point_labels_for": {
+      "type": "string",
+      "enum": [
+        "player_0",
+        "player_1"
+      ]
+    },
+    "bottom_home_board_side": {
+      "description": "The physical side containing the bottom player's own points 1 through 6.",
+      "type": "string",
+      "enum": [
+        "left",
+        "right"
+      ]
+    },
+    "cube_display_side": {
+      "description": "Presentation only. It never implies cube ownership.",
+      "type": "string",
+      "enum": [
+        "left",
+        "right",
+        "center",
+        "off_board",
+        "auto"
+      ]
+    },
+    "rotation": {
+      "type": "string",
+      "enum": [
+        "source",
+        "rotated",
+        "default",
+        "custom"
+      ]
+    },
+    "view_origin": {
+      "description": "source means the source established the view; external means the view came from separately supplied evidence; generated_default means a renderer policy created it.",
+      "type": "string",
+      "enum": [
+        "source",
+        "external",
+        "generated_default"
+      ]
+    }
+  },
+  "x-bms-invariants": [
+    "top_player and bottom_player must differ.",
+    "bottom_home_board_side determines physical point placement, movement directions, and bear-off tray positions. These are not stored independently.",
+    "cube_display_side is presentation only and never implies ownership."
+  ]
+}

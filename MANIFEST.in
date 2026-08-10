@@ -1,0 +1,16 @@
+include README.md
+include LICENSE.md
+include LICENSES/AGPL-3.0-only.txt
+include LICENSES/CC-BY-SA-4.0.txt
+include pyproject.toml
+include setup.cfg
+include setup.py
+recursive-include src *.json
+prune docs
+prune evidence
+prune fixtures
+prune research
+prune scripts
+prune tests
+global-exclude *.py[cod]
+global-exclude __pycache__

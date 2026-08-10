@@ -1,0 +1,239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://backgammonmadesimple.org/schemas/position-source-v1.schema.json",
+  "title": "Backgammon Position Source Record v1 Candidate, cleanup revision 1.2.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "position_schema_version",
+    "format",
+    "profile",
+    "raw_source",
+    "parser",
+    "player_mapping",
+    "source_view_available",
+    "field_origins",
+    "external_settings",
+    "assumptions",
+    "warnings",
+    "conversion_losses"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "position-source-v1"
+    },
+    "position_schema_version": {
+      "const": "universal-position-v1"
+    },
+    "format": {
+      "type": "string",
+      "enum": [
+        "xgid",
+        "gnuid",
+        "ogid-ankigammon-v1",
+        "sage",
+        "bgsage",
+        "gnubg-nn",
+        "canonical-json"
+      ]
+    },
+    "profile": {
+      "description": "Explicit adapter or implementation profile.",
+      "type": "string",
+      "minLength": 1
+    },
+    "raw_source": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "const": "text"
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1
+            },
+            "media_type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "sha256",
+            "media_type"
+          ],
+          "properties": {
+            "kind": {
+              "const": "artifact"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "media_type": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uri": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "size_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    },
+    "parser": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "runtime_version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runtime_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "player_mapping": {
+      "description": "Source-role names mapped to canonical players.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "enum": [
+          "player_0",
+          "player_1"
+        ]
+      }
+    },
+    "source_view_available": {
+      "description": "True only when the source itself establishes the view. A generated renderer default does not make this true.",
+      "type": "boolean"
+    },
+    "field_origins": {
+      "type": "object",
+      "description": "Keys are JSON Pointer paths into universal-position-v1.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "represented_directly",
+              "derived",
+              "supplied_externally",
+              "unknown",
+              "not_represented",
+              "lost_in_conversion"
+            ]
+          },
+          "source_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "external_settings": {
+      "description": "Only values genuinely supplied from outside this source. Directly decoded or derived values must not be repeated here. decision_type is never an external setting.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "conversion_losses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "field",
+          "reason",
+          "severity"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "informational",
+              "warning",
+              "blocking"
+            ]
+          }
+        }
+      }
+    },
+    "source_hash": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

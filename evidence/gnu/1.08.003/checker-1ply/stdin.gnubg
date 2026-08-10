@@ -1,0 +1,41 @@
+set confirm new off
+set confirm save off
+set player 0 name player0
+set player 1 name player1
+set variation standard
+set cube use on
+set jacoby off
+set beavers 0
+set threads 1
+set output digits 6
+set output winpc off
+set output matchpc off
+set output mwc off
+set output rawboard off
+set evaluation chequerplay type evaluation
+set evaluation chequerplay evaluation plies 1
+set evaluation chequerplay evaluation cubeful on
+set evaluation chequerplay evaluation deterministic on
+set evaluation chequerplay evaluation noise 0
+set evaluation chequerplay evaluation prune off
+set evaluation cubedecision type evaluation
+set evaluation cubedecision evaluation plies 1
+set evaluation cubedecision evaluation cubeful on
+set evaluation cubedecision evaluation deterministic on
+set evaluation cubedecision evaluation noise 0
+set evaluation cubedecision evaluation prune off
+set evaluation movefilter 1 0 0 8 0.160
+set gnubgid 4PPgASTgc/ABMA:cAnqAAAAAAAE
+show board
+show dice
+show cube
+show score
+show turn
+show crawford
+show jacoby
+show beavers
+show evaluation
+show threads
+show output
+hint 8
+quit

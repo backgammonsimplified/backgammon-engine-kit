@@ -1,5 +1,7 @@
 include README.md
 include LICENSE.md
+include LICENSES/AGPL-3.0-only.txt
+include LICENSES/CC-BY-SA-4.0.txt
 include pyproject.toml
 include setup.cfg
 include setup.py

@@ -4,13 +4,6 @@ Copyright © 2026 Marty Gale and contributors.
 
 Backgammon Engine Kit contains software, explanatory material, and possibly third-party material. Different parts of the repository are licensed differently.
 
-The complete legal texts are included in:
-
-```text
-LICENSES/AGPL-3.0-only.txt
-LICENSES/CC-BY-SA-4.0.txt
-```
-
 ## 1. Software — GNU AGPL v3
 
 Unless a file states otherwise, original software in this repository is licensed under the **GNU Affero General Public License, version 3 only**:

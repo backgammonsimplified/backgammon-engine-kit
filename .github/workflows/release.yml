@@ -1,6 +1,9 @@
 name: Publish Python package
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
   workflow_dispatch:
     inputs:
       target:
@@ -87,7 +90,7 @@ jobs:
 
   publish-testpypi:
     name: Publish to TestPyPI
-    if: ${{ inputs.target == 'testpypi' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi' }}
     needs: build
     runs-on: ubuntu-latest
     environment: testpypi
@@ -109,7 +112,7 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    if: ${{ inputs.target == 'pypi' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'pypi' }}
     needs: build
     runs-on: ubuntu-latest
     environment: pypi

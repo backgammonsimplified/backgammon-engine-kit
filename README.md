@@ -132,3 +132,14 @@ scripts.
 
 See [Architecture](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/master/docs/architecture/README.md) and
 [the fixtures overview](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/master/fixtures/README.md) for the contract and evidence policy.
+
+## Licensing
+
+Backgammon Engine Kit follows the Backgammon Simplified mixed-license policy:
+
+- **Software:** GNU Affero General Public License, version 3 only (`AGPL-3.0-only`).
+- **Original explanatory and educational material:** Creative Commons Attribution-ShareAlike 4.0 International (`CC-BY-SA-4.0`).
+- **Backgammon Simplified name, logo, and distinctive official branding:** no trademark rights are granted by those licenses.
+- **Third-party material:** remains under its original license or terms.
+
+See [`LICENSE.md`](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/master/LICENSE.md) for the authoritative scope mapping and attribution rules.

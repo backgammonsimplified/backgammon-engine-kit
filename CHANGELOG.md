@@ -4,13 +4,13 @@ All notable user-facing changes to Backgammon Engine Kit are documented in this 
 
 The format follows the principles of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Backgammon Engine Kit uses semantic version numbers for public releases.
 
-## [Unreleased]
+## Unreleased
 
 ### Changed
 
 - Reworked public documentation for first-time package users, including clearer installation, quick-start, support-boundary, player-identity, and contribution guidance.
 
-## [0.3.0] - 2026-08-11
+## 0.3.0 - 2026-08-11
 
 ### Added
 
@@ -31,5 +31,4 @@ The format follows the principles of [Keep a Changelog](https://keepachangelog.c
 - Version 0.3.0 intentionally supports a bounded set of source states and engine configurations. Unsupported or source-unknown facts remain explicit rather than being guessed.
 - BGSage rollout and unverified engine settings are not supported in this release.
 
-[Unreleased]: https://github.com/backgammonsimplified/backgammon-engine-kit/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/backgammonsimplified/backgammon-engine-kit/releases/tag/v0.3.0
+Release comparison links can be added after the corresponding public tag exists.

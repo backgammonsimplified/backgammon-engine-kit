@@ -1,7 +1,14 @@
 # Universal Position v1 decoder support matrix
 
-Legend: `decoded`, `derived`, `requires_external_context`, `unsupported`,
-`not_represented`.
+This matrix describes the identifier facts that Backgammon Engine Kit 0.3.0 can establish through its strict 15-checker XGID and complete GNUID profiles.
+
+Legend:
+
+- `decoded`: represented directly by the source and decoded by Engine Kit;
+- `derived`: computed deterministically from decoded/profile-fixed facts;
+- `requires_external_context`: not established by the source but may be supplied through validated enrichment;
+- `unsupported`: represented by the source but intentionally outside the current decoder contract;
+- `not_represented`: the source format does not encode the fact.
 
 | Semantic field or state | XGID 15-checker profile | GNU combined-ID 15-checker profile |
 |---|---|---|
@@ -32,6 +39,10 @@ Legend: `decoded`, `derived`, `requires_external_context`, `unsupported`,
 | Game state | derived as active post-opening state | decoded |
 | Arbitrary source view | decoded | not_represented |
 
-Unsupported or unresolved fields are rejected when a downstream adapter requires
-them. The matrix describes this bounded milestone, not a claim of universal
-support for every historical source variant.
+## How consumers should use the matrix
+
+A fact marked `requires_external_context` is not permission to guess. Consumers may supply it only through the validated enrichment API, which can fill source-unknown fields but cannot overwrite decoded or derived facts.
+
+A fact marked `unsupported` or `not_represented` remains explicit. Downstream adapters reject or return unavailable state when that fact is required for a safe operation.
+
+The matrix is a compatibility statement for the 0.3.0 profiles, not a claim that every historical XGID or GNU Backgammon state can be losslessly represented across both formats.

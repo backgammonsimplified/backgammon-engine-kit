@@ -113,7 +113,7 @@ jobs:
           assert created['object']['sha'] == os.environ['RELEASE_SOURCE_SHA']
           PY
 
-      - name: Create GitHub Release
+      - name: Create draft GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -168,10 +168,9 @@ jobs:
               "tag_name": os.environ["RELEASE_TAG"],
               "name": "Backgammon Engine Kit 0.3.0",
               "body": Path('/tmp/release-body.md').read_text(encoding='utf-8'),
-              "draft": False,
+              "draft": True,
               "prerelease": False,
               "generate_release_notes": False,
-              "make_latest": "true",
           }))
           PY
 
@@ -191,14 +190,13 @@ jobs:
           with open('/tmp/release-created.json', encoding='utf-8') as handle:
               release = json.load(handle)
           assert release['tag_name'] == os.environ['RELEASE_TAG']
-          assert release['draft'] is False
+          assert release['draft'] is True
           assert release['prerelease'] is False
           with open('/tmp/release-id', 'w', encoding='utf-8') as handle:
               handle.write(str(release['id']))
-          print(release['html_url'])
           PY
 
-      - name: Attach exact wheel and sdist to GitHub Release
+      - name: Attach exact wheel and sdist to draft Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -218,7 +216,60 @@ jobs:
               > "/tmp/asset-${file}.json"
           done
 
-      - name: Verify final tag and release
+      - name: Verify draft Release assets before publication
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_id="$(cat /tmp/release-id)"
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          curl --fail-with-body -sS \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api}/releases/${release_id}" \
+            > /tmp/draft-release.json
+
+          python - <<'PY'
+          import json
+          import os
+          with open('/tmp/draft-release.json', encoding='utf-8') as handle:
+              release = json.load(handle)
+          assert release['tag_name'] == os.environ['RELEASE_TAG']
+          assert release['draft'] is True
+          assets = {item['name'] for item in release['assets']}
+          assert assets == {os.environ['WHEEL_FILE'], os.environ['SDIST_FILE']}, assets
+          PY
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_id="$(cat /tmp/release-id)"
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          printf '%s\n' '{"draft":false,"prerelease":false,"make_latest":"true"}' > /tmp/publish-release.json
+          curl --fail-with-body -sS \
+            -X PATCH \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api}/releases/${release_id}" \
+            --data-binary @/tmp/publish-release.json \
+            > /tmp/release-published.json
+
+          python - <<'PY'
+          import json
+          with open('/tmp/release-published.json', encoding='utf-8') as handle:
+              release = json.load(handle)
+          assert release['draft'] is False
+          assert release['prerelease'] is False
+          print(release['html_url'])
+          PY
+
+      - name: Verify final tag and public Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

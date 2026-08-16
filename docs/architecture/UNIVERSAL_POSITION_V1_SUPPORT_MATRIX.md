@@ -37,7 +37,7 @@ Legend:
 | Automatic doubles | not_represented | not_represented |
 | Variation | not_represented | not_represented |
 | Game state | derived as active post-opening state | decoded |
-| Arbitrary source view | decoded | not_represented |
+| Source view/orientation | derived from the fixed XGID top/bottom orientation | not_represented |
 
 ## How consumers should use the matrix
 

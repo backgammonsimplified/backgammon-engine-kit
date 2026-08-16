@@ -6,11 +6,7 @@ The format follows the principles of [Keep a Changelog](https://keepachangelog.c
 
 ## Unreleased
 
-### Changed
-
-- Reworked public documentation for first-time package users, including clearer installation, quick-start, support-boundary, player-identity, and contribution guidance.
-
-## 0.3.0 - 2026-08-11
+## 0.3.0 - 2026-08-16
 
 ### Added
 
@@ -25,6 +21,10 @@ The format follows the principles of [Keep a Changelog](https://keepachangelog.c
 - Deterministic renderer and JSON command-line interfaces.
 - Packaged JSON schemas for the public position contracts.
 - Mixed-license project policy: `AGPL-3.0-only` for software and `CC-BY-SA-4.0` for original explanatory and educational material.
+
+### Changed
+
+- Reworked public documentation for first-time package users, including clearer installation, quick-start, support-boundary, player-identity, and contribution guidance.
 
 ### Notes
 

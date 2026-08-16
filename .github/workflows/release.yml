@@ -4,39 +4,28 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
-  workflow_dispatch:
-    inputs:
-      target:
-        description: Registry to publish the validated 0.3.0 artifacts to
-        required: true
-        type: choice
-        options:
-          - testpypi
-          - pypi
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build and validate 0.3.0
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi') }}
+    name: Build and validate final 0.3.0 candidate
     runs-on: ubuntu-latest
     steps:
-      - name: Check out exact 0.3.0 release root
+      - name: Check out exact final 0.3.0 source commit
         uses: actions/checkout@v6
         with:
-          ref: 28e8c024a13b94f8e99f19daf57a88d870f88396
+          ref: 5aeb87c80cf112b3a323451bb7844d88acceaea0
           persist-credentials: false
 
       - name: Verify exact release commit
         shell: bash
         run: |
           set -euo pipefail
-          expected="28e8c024a13b94f8e99f19daf57a88d870f88396"
+          expected="5aeb87c80cf112b3a323451bb7844d88acceaea0"
           actual="$(git rev-parse HEAD)"
           test "$actual" = "$expected"
-          test "$(git rev-list --count HEAD)" = "1"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -54,7 +43,7 @@ jobs:
       - name: Build wheel and sdist
         run: python -m build
 
-      - name: Validate distribution metadata
+      - name: Validate distribution metadata and README rendering
         run: python -m twine check dist/*
 
       - name: Smoke-test built wheel
@@ -77,105 +66,14 @@ jobs:
           .release-sdist/bin/python -m pip check
           .release-sdist/bin/python -c 'import backgammon_engine_kit as b; assert b.__version__ == "0.3.0"'
 
-      - name: Record artifact hashes
+      - name: Record exact final artifact hashes
         shell: bash
         run: sha256sum dist/*
 
-      - name: Upload distributions for TestPyPI
+      - name: Upload exact final candidate distributions
         uses: actions/upload-artifact@v7
         with:
-          name: python-package-distributions
+          name: final-0.3.0-distributions
           path: dist/*
           if-no-files-found: error
-          retention-days: 7
-
-  verify-production-source:
-    name: Verify TestPyPI promotion source
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi') }}
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: Download exact TestPyPI-tested artifact
-        uses: actions/download-artifact@v8
-        with:
-          artifact-ids: 9267109266
-          github-token: ${{ github.token }}
-          repository: backgammonsimplified/backgammon-engine-kit
-          run-id: 31960514787
-          path: dist
-
-      - name: Verify exact promoted files
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f dist/backgammon_engine_kit-0.3.0-py3-none-any.whl
-          test -f dist/backgammon_engine_kit-0.3.0.tar.gz
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
-          printf '%s  %s\n' \
-            '15f97b53e2ec860e917674d51d01eeeeede043dd4fc85c2d7407e03622ffdeeb' \
-            'dist/backgammon_engine_kit-0.3.0-py3-none-any.whl' \
-            'abbe12549fa1396168d90c14fc4a7d3f324460e33153f9723e3df1f1116b504a' \
-            'dist/backgammon_engine_kit-0.3.0.tar.gz' | sha256sum -c -
-
-      - name: Hand off exact production distributions
-        uses: actions/upload-artifact@v7
-        with:
-          name: production-package-distributions
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 7
-
-  publish-testpypi:
-    name: Publish to TestPyPI
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi' }}
-    needs: build
-    runs-on: ubuntu-latest
-    environment: testpypi
-    permissions:
-      actions: read
-      contents: read
-      id-token: write
-    steps:
-      - name: Download validated distributions
-        uses: actions/download-artifact@v8
-        with:
-          name: python-package-distributions
-          path: dist
-
-      - name: Publish package distributions to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-
-  publish-pypi:
-    name: Publish exact TestPyPI-tested files to PyPI
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'pypi' }}
-    needs: verify-production-source
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      actions: read
-      contents: read
-      id-token: write
-    steps:
-      - name: Download exact promoted distributions
-        uses: actions/download-artifact@v8
-        with:
-          name: production-package-distributions
-          path: dist
-
-      - name: Re-verify exact promoted files
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
-          printf '%s  %s\n' \
-            '15f97b53e2ec860e917674d51d01eeeeede043dd4fc85c2d7407e03622ffdeeb' \
-            'dist/backgammon_engine_kit-0.3.0-py3-none-any.whl' \
-            'abbe12549fa1396168d90c14fc4a7d3f324460e33153f9723e3df1f1116b504a' \
-            'dist/backgammon_engine_kit-0.3.0.tar.gz' | sha256sum -c -
-
-      - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+          retention-days: 30

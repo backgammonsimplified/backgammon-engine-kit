@@ -1,0 +1,297 @@
+name: Finalize v0.3.0 GitHub release
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - .github/workflows/finalize-v0.3.0.yml
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  finalize:
+    name: Create v0.3.0 tag and GitHub Release
+    if: ${{ startsWith(github.event.head_commit.message, 'Add one-shot v0.3.0 release finalizer') }}
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: v0.3.0
+      RELEASE_SOURCE_SHA: 5aeb87c80cf112b3a323451bb7844d88acceaea0
+      RELEASE_RUN_ID: "31961519965"
+      RELEASE_ARTIFACT_ID: "9267369583"
+      WHEEL_FILE: backgammon_engine_kit-0.3.0-py3-none-any.whl
+      WHEEL_SHA256: c75b920971c0947c41d79cbae09ae2bafda7717201798fee27fd6b1c840d05f7
+      SDIST_FILE: backgammon_engine_kit-0.3.0.tar.gz
+      SDIST_SHA256: 0aff56858305c5864934cc58b1500e39952459649841f1af5d1a7d4d4a0bdefb
+    steps:
+      - name: Verify tag and release do not already exist
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          auth=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+
+          tag_status="$(curl -sS -o /tmp/tag.json -w '%{http_code}' "${auth[@]}" "${api}/git/ref/tags/${RELEASE_TAG}")"
+          test "$tag_status" = "404"
+
+          release_status="$(curl -sS -o /tmp/release.json -w '%{http_code}' "${auth[@]}" "${api}/releases/tags/${RELEASE_TAG}")"
+          test "$release_status" = "404"
+
+      - name: Download exact published release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: 9267369583
+          github-token: ${{ github.token }}
+          repository: backgammonsimplified/backgammon-engine-kit
+          run-id: 31961519965
+          path: dist
+
+      - name: Verify exact release artifact hashes and public PyPI state
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "dist/${WHEEL_FILE}"
+          test -f "dist/${SDIST_FILE}"
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
+          printf '%s  %s\n' \
+            "$WHEEL_SHA256" "dist/${WHEEL_FILE}" \
+            "$SDIST_SHA256" "dist/${SDIST_FILE}" | sha256sum -c -
+
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          url = "https://pypi.org/pypi/backgammon-engine-kit/0.3.0/json"
+          with urllib.request.urlopen(url, timeout=30) as response:
+              payload = json.load(response)
+
+          expected = {
+              os.environ["WHEEL_FILE"]: os.environ["WHEEL_SHA256"],
+              os.environ["SDIST_FILE"]: os.environ["SDIST_SHA256"],
+          }
+          observed = {item["filename"]: item["digests"]["sha256"] for item in payload["urls"]}
+          assert payload["info"]["name"] == "backgammon-engine-kit"
+          assert payload["info"]["version"] == "0.3.0"
+          assert observed == expected, (observed, expected)
+          PY
+
+      - name: Create lightweight tag at exact packaged source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          python - <<'PY' > /tmp/tag-payload.json
+          import json
+          import os
+          print(json.dumps({
+              "ref": "refs/tags/" + os.environ["RELEASE_TAG"],
+              "sha": os.environ["RELEASE_SOURCE_SHA"],
+          }))
+          PY
+          curl --fail-with-body -sS \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api}/git/refs" \
+            --data-binary @/tmp/tag-payload.json \
+            > /tmp/tag-created.json
+
+          python - <<'PY'
+          import json
+          import os
+          with open('/tmp/tag-created.json', encoding='utf-8') as handle:
+              created = json.load(handle)
+          assert created['ref'] == 'refs/tags/' + os.environ['RELEASE_TAG']
+          assert created['object']['sha'] == os.environ['RELEASE_SOURCE_SHA']
+          PY
+
+      - name: Create draft GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/release-body.md <<'EOF'
+          Backgammon Engine Kit 0.3.0 is the first public package release.
+
+          ## Highlights
+
+          - Immutable engine-neutral analysis request and result contracts with deterministic serialization and cache identity.
+          - Verified GNU Backgammon 1.08.003 checker-play and cube-analysis support at the evidence-backed `1ply` configuration.
+          - Verified BGSage 1.2.20260706 checker-play and cube-analysis support at the evidence-backed `1ply` configuration.
+          - Universal Position v1, Position Source v1, and Backgammon View v1 contracts.
+          - Strict XGID and complete GNUID decoding, plus native Python XGID/GNUID conversion with stable player identity and explicit normalization/loss reporting.
+          - Deterministic renderer-facing JSON and command-line interfaces.
+          - Public documentation for installation, quick start, support boundaries, player identity, and contribution guidance.
+
+          ## Install
+
+          ```bash
+          python -m pip install backgammon-engine-kit==0.3.0
+          ```
+
+          ## Release integrity
+
+          The tag points to the exact source commit used for the published package artifacts:
+
+          `5aeb87c80cf112b3a323451bb7844d88acceaea0`
+
+          Published artifact SHA-256 values:
+
+          - `backgammon_engine_kit-0.3.0-py3-none-any.whl`: `c75b920971c0947c41d79cbae09ae2bafda7717201798fee27fd6b1c840d05f7`
+          - `backgammon_engine_kit-0.3.0.tar.gz`: `0aff56858305c5864934cc58b1500e39952459649841f1af5d1a7d4d4a0bdefb`
+
+          The production PyPI publication was performed through GitHub Trusted Publishing with digital attestations, and a separate clean-environment consumer verification passed against the public PyPI release.
+
+          ## Support boundary
+
+          Version 0.3.0 intentionally supports a bounded set of source states and engine configurations. Unsupported or source-unknown facts remain explicit rather than being guessed. BGSage rollout and unverified engine settings are not supported in this release.
+
+          ## Licensing
+
+          Software is `AGPL-3.0-only`; original explanatory and educational material is `CC-BY-SA-4.0`. Third-party material remains under its original license or terms.
+          EOF
+
+          python - <<'PY' > /tmp/release-payload.json
+          import json
+          import os
+          from pathlib import Path
+          print(json.dumps({
+              "tag_name": os.environ["RELEASE_TAG"],
+              "name": "Backgammon Engine Kit 0.3.0",
+              "body": Path('/tmp/release-body.md').read_text(encoding='utf-8'),
+              "draft": True,
+              "prerelease": False,
+              "generate_release_notes": False,
+          }))
+          PY
+
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          curl --fail-with-body -sS \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api}/releases" \
+            --data-binary @/tmp/release-payload.json \
+            > /tmp/release-created.json
+
+          python - <<'PY'
+          import json
+          import os
+          with open('/tmp/release-created.json', encoding='utf-8') as handle:
+              release = json.load(handle)
+          assert release['tag_name'] == os.environ['RELEASE_TAG']
+          assert release['draft'] is True
+          assert release['prerelease'] is False
+          with open('/tmp/release-id', 'w', encoding='utf-8') as handle:
+              handle.write(str(release['id']))
+          PY
+
+      - name: Attach exact wheel and sdist to draft Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_id="$(cat /tmp/release-id)"
+          upload="https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets"
+          for file in "$WHEEL_FILE" "$SDIST_FILE"; do
+            curl --fail-with-body -sS \
+              -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -H "Content-Type: application/octet-stream" \
+              "${upload}?name=${file}" \
+              --data-binary "@dist/${file}" \
+              > "/tmp/asset-${file}.json"
+          done
+
+      - name: Verify draft Release assets before publication
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_id="$(cat /tmp/release-id)"
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          curl --fail-with-body -sS \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api}/releases/${release_id}" \
+            > /tmp/draft-release.json
+
+          python - <<'PY'
+          import json
+          import os
+          with open('/tmp/draft-release.json', encoding='utf-8') as handle:
+              release = json.load(handle)
+          assert release['tag_name'] == os.environ['RELEASE_TAG']
+          assert release['draft'] is True
+          assets = {item['name'] for item in release['assets']}
+          assert assets == {os.environ['WHEEL_FILE'], os.environ['SDIST_FILE']}, assets
+          PY
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_id="$(cat /tmp/release-id)"
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          printf '%s\n' '{"draft":false,"prerelease":false,"make_latest":"true"}' > /tmp/publish-release.json
+          curl --fail-with-body -sS \
+            -X PATCH \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api}/releases/${release_id}" \
+            --data-binary @/tmp/publish-release.json \
+            > /tmp/release-published.json
+
+          python - <<'PY'
+          import json
+          with open('/tmp/release-published.json', encoding='utf-8') as handle:
+              release = json.load(handle)
+          assert release['draft'] is False
+          assert release['prerelease'] is False
+          print(release['html_url'])
+          PY
+
+      - name: Verify final tag and public Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          auth=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+          curl --fail-with-body -sS "${auth[@]}" "${api}/git/ref/tags/${RELEASE_TAG}" > /tmp/final-tag.json
+          curl --fail-with-body -sS "${auth[@]}" "${api}/releases/tags/${RELEASE_TAG}" > /tmp/final-release.json
+
+          python - <<'PY'
+          import json
+          import os
+          with open('/tmp/final-tag.json', encoding='utf-8') as handle:
+              tag = json.load(handle)
+          with open('/tmp/final-release.json', encoding='utf-8') as handle:
+              release = json.load(handle)
+          assert tag['object']['sha'] == os.environ['RELEASE_SOURCE_SHA']
+          assert release['tag_name'] == os.environ['RELEASE_TAG']
+          assert release['draft'] is False
+          assert release['prerelease'] is False
+          assets = {item['name'] for item in release['assets']}
+          assert assets == {os.environ['WHEEL_FILE'], os.environ['SDIST_FILE']}, assets
+          print(release['html_url'])
+          PY

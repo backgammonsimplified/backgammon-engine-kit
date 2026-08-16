@@ -1,0 +1,69 @@
+name: Verify published PyPI 0.3.0
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/verify-pypi-release.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify public PyPI install and hashes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Verify PyPI JSON metadata and exact file hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import urllib.request
+
+          url = "https://pypi.org/pypi/backgammon-engine-kit/0.3.0/json"
+          with urllib.request.urlopen(url, timeout=30) as response:
+              payload = json.load(response)
+
+          assert payload["info"]["name"] == "backgammon-engine-kit"
+          assert payload["info"]["version"] == "0.3.0"
+
+          expected = {
+              "backgammon_engine_kit-0.3.0-py3-none-any.whl": "c75b920971c0947c41d79cbae09ae2bafda7717201798fee27fd6b1c840d05f7",
+              "backgammon_engine_kit-0.3.0.tar.gz": "0aff56858305c5864934cc58b1500e39952459649841f1af5d1a7d4d4a0bdefb",
+          }
+          observed = {
+              item["filename"]: item["digests"]["sha256"]
+              for item in payload["urls"]
+          }
+          assert observed == expected, (observed, expected)
+          print(json.dumps({"name": payload["info"]["name"], "version": payload["info"]["version"], "files": observed}, sort_keys=True))
+          PY
+
+      - name: Install from public PyPI in a clean environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .verify-pypi
+          .verify-pypi/bin/python -m pip install --upgrade pip
+          .verify-pypi/bin/python -m pip install --no-cache-dir --index-url https://pypi.org/simple backgammon-engine-kit==0.3.0
+          .verify-pypi/bin/python -m pip check
+          .verify-pypi/bin/python -c 'import backgammon_engine_kit as b; assert b.__version__ == "0.3.0"; print(b.__version__)'
+
+      - name: Smoke-test public CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$(printf '%s\n' '{"operation":"capabilities"}' | .verify-pypi/bin/python -m backgammon_engine_kit)"
+          printf '%s\n' "$output"
+          python - "$output" <<'PY'
+          import json
+          import sys
+          payload = json.loads(sys.argv[1])
+          assert payload["ok"] is True
+          PY

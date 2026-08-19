@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 
 from backgammon_engine_kit.capabilities import capability_report
-from backgammon_engine_kit.gnu.config import gnu_configuration, verified_gnu_configuration
+from backgammon_engine_kit.gnu.config import (
+    GNU_NORMAL_MOVE_FILTER_PROFILE,
+    gnu_configuration,
+    verified_gnu_configuration,
+)
 from backgammon_engine_kit.gnu.invocation import build_invocation as build_gnu_invocation
 from backgammon_engine_kit.models import AnalysisRequest, Position
 from backgammon_engine_kit.sage.config import sage_configuration, verified_sage_configuration
@@ -72,7 +76,8 @@ def test_historical_trial_profiles_pin_checker_and_cube_independently():
     gnu_options = dict(gnu.options)
     assert gnu_options["checker_evaluation_plies"] == 3
     assert gnu_options["cube_evaluation_plies"] == 2
-    assert "checker-3ply-cube-2ply" in gnu.profile
+    assert gnu_options["checker_move_filter_profile"] == GNU_NORMAL_MOVE_FILTER_PROFILE
+    assert "checker-3ply-cube-2ply-normal-filter" in gnu.profile
     assert gnu.configuration_hash == gnu_configuration(3, 2).configuration_hash
 
 
@@ -90,7 +95,7 @@ def test_sage_trial_profile_flows_into_decision_specific_protocol_requests():
     assert cube["analysis"]["parallel_threads"] == 2
 
 
-def test_gnu_trial_profile_flows_into_checker_and_cube_commands():
+def test_gnu_trial_profile_flows_into_checker_cube_and_normal_filter_commands():
     configuration = gnu_configuration(checker_plies=3, cube_plies=2, threads=2)
     checker = build_gnu_invocation(gnu_request("checker", "3ply", configuration), GnuRuntime())
     cube = build_gnu_invocation(gnu_request("cube", "2ply", configuration), GnuRuntime())
@@ -98,6 +103,10 @@ def test_gnu_trial_profile_flows_into_checker_and_cube_commands():
         assert "set evaluation chequerplay evaluation plies 3\n" in invocation.stdin_text
         assert "set evaluation cubedecision evaluation plies 2\n" in invocation.stdin_text
         assert "set threads 2\n" in invocation.stdin_text
+        assert "set evaluation movefilter 1 0 0 8 0.160\n" in invocation.stdin_text
+        assert "set evaluation movefilter 2 1 -1 0 0.000\n" in invocation.stdin_text
+        assert "set evaluation movefilter 3 2 0 2 0.040\n" in invocation.stdin_text
+        assert "set evaluation movefilter 4 3 -1 0 0.000\n" in invocation.stdin_text
     assert checker.stdin_text.endswith("hint 8\nquit\n")
     assert cube.stdin_text.endswith("hint\nquit\n")
 
@@ -119,6 +128,7 @@ def test_numeric_one_through_four_ply_is_runtime_configurable_without_source_cha
     invocation = build_gnu_invocation(gnu_request("checker", "2ply", gnu), GnuRuntime())
     assert "set evaluation chequerplay evaluation plies 2\n" in invocation.stdin_text
     assert "set evaluation cubedecision evaluation plies 4\n" in invocation.stdin_text
+    assert dict(gnu.options)["checker_move_filter_profile"] == GNU_NORMAL_MOVE_FILTER_PROFILE
 
 
 def test_capability_report_matches_retained_evidence_not_every_configurable_setting():

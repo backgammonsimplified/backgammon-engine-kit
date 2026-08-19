@@ -15,8 +15,8 @@ import sys
 
 PROTOCOL = "bgsage-position-analysis-v1"
 MODEL = "stage9"
-SUPPORTED_CHECKER_SETTINGS = frozenset(("1ply", "4ply"))
-SUPPORTED_CUBE_SETTINGS = frozenset(("1ply", "3ply"))
+SUPPORTED_CHECKER_SETTINGS = frozenset(("1ply", "2ply", "3ply", "4ply"))
+SUPPORTED_CUBE_SETTINGS = frozenset(("1ply", "2ply", "3ply", "4ply"))
 
 
 def _canonical(data):
@@ -321,7 +321,7 @@ def _analyze(payload, identity, bearoff):
                 {"action": "Double/Pass", "equity": result.equity_dp, "output_order": 3},
             ],
             "cubeless_equity": result.cubeless_equity,
-            "details": result.details,
+            "details": None,
             "eval_level": result.eval_level,
             "is_beaver": result.is_beaver,
             "optimal_action": result.optimal_action,

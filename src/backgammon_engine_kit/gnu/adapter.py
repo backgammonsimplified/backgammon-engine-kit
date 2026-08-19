@@ -1,4 +1,4 @@
-"""Evidence-gated GNU Backgammon 1-ply checker/cube adapter."""
+"""Evidence-gated GNU Backgammon checker/cube adapter."""
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,7 +12,12 @@ from ..adapters import (
 )
 from ..models import RawSource
 from ..process import run_process
-from .config import GNU_VERSION_LINE, verified_gnu_configuration
+from .config import (
+    GNU_SUPPORTED_CHECKER_PLIES,
+    GNU_SUPPORTED_CUBE_PLIES,
+    GNU_VERSION_LINE,
+    gnu_configuration_settings,
+)
 from .invocation import build_invocation
 from .parser import GnuTextParser
 
@@ -45,14 +50,39 @@ class GnuAdapter(EngineAdapter):
     def _validate_request(self, request):
         if request.engine != "gnu":
             raise UnsupportedCapability("GNU adapter received a request for another engine")
-        if request.analysis_setting != "1ply":
-            raise UnsupportedCapability("GNU evidence supports only the 1ply analysis setting")
         if request.decision_type not in ("checker", "cube"):
             raise UnsupportedCapability("GNU evidence supports only checker and cube decisions")
+        try:
+            requested_plies = int(request.analysis_setting[:-3])
+        except (TypeError, ValueError):
+            raise UnsupportedCapability("GNU analysis setting must be a supported ply value")
+        supported = (
+            GNU_SUPPORTED_CHECKER_PLIES
+            if request.decision_type == "checker"
+            else GNU_SUPPORTED_CUBE_PLIES
+        )
+        if requested_plies not in supported:
+            raise UnsupportedCapability(
+                "GNU evidence does not support {} {}".format(
+                    request.analysis_setting,
+                    request.decision_type,
+                )
+            )
         if request.position.format != "gnuid":
             raise UnsupportedCapability("GNU evidence requires a verified combined GNU ID")
-        if request.configuration != verified_gnu_configuration():
-            raise UnsupportedCapability("GNU request configuration identity differs from verified evidence")
+        try:
+            settings = gnu_configuration_settings(request.configuration)
+        except ValueError as exc:
+            raise UnsupportedCapability(str(exc))
+        expected_plies = (
+            settings["checker_plies"]
+            if request.decision_type == "checker"
+            else settings["cube_plies"]
+        )
+        if requested_plies != expected_plies:
+            raise UnsupportedCapability(
+                "GNU request setting does not match the pinned checker/cube profile"
+            )
 
     def _validate_runtime(self):
         try:

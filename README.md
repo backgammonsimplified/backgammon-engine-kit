@@ -118,7 +118,7 @@ Applications should use the labels defined by the API surface they are consuming
 
 ## Supported position formats
 
-Version 0.3.0 intentionally supports a bounded, validated subset of identifier state.
+Version 0.4.0 intentionally supports a bounded, validated subset of identifier state.
 
 - **XGID:** complete `XGID=` form using the strict 15-checker profile.
 - **GNUID:** complete 14-character GNU Position ID plus 12-character GNU Match ID, separated by `:`.
@@ -128,14 +128,19 @@ The [Universal Position support matrix](https://github.com/backgammonsimplified/
 
 ## Verified engine configurations
 
-Engine execution is evidence-gated. Version 0.3.0 has verified checker-play and cube-analysis support for:
+Engine execution is evidence-gated. Version 0.4.0 preserves the exact legacy one-ply configurations from 0.3.0 and adds configurable numeric profiles for campaign commissioning.
 
-- GNU Backgammon `1.08.003` at the verified `1ply` configuration;
-- BGSage `1.2.20260706` at the verified `1ply` configuration.
+The public configuration surface can represent checker and cube settings from 1 through 4 plies for both GNU Backgammon `1.08.003` and BGSage `1.2.20260706`. Representation alone is not a claim that every possible combination has retained runtime evidence.
 
-Other GNU and BGSage settings are not implied by the presence of an engine adapter. Unsupported or unverified configurations remain unavailable rather than silently falling back to another setting. BGSage rollout is not supported in 0.3.0.
+The higher-ply production-commissioning profile validated by a bounded real-runtime smoke is:
 
-See [Engine analysis contracts](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/master/docs/architecture/ENGINE_ANALYSIS_CONTRACTS.md) for the request, result, cache, and engine-evidence boundaries.
+- BGSage checker `4ply`, cube `3ply`, one thread, seed `42`;
+- GNU checker configured target `3ply`, cube `2ply`, one thread;
+- GNU checker move filter `normal-v1` with its complete Normal filter rows pinned in configuration identity.
+
+GNU checker plies are a configured target. Under the pinned Normal move filter, an individual candidate, including the recommended candidate, may have a shallower emitted `actual_ply`. Engine Kit preserves that actual depth and rejects candidates deeper than the configured target. GNU cube actual depth must equal the configured cube depth. Sage top-level checker/cube depth must equal the requested setting, while retained lower-ply Sage checker candidates remain explicitly labeled.
+
+See [`docs/configurable-engine-profiles.md`](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/release/v0.4.0/docs/configurable-engine-profiles.md) for the higher-ply configuration and evidence boundary, and [Engine analysis contracts](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/master/docs/architecture/ENGINE_ANALYSIS_CONTRACTS.md) for the request, result, cache, and engine-evidence contracts.
 
 ## Command-line interface
 
@@ -187,11 +192,11 @@ These constraints are intended to make the package predictable at integration bo
 
 ## Project status
 
-`0.3.0` is the first public release line. Its API is intentionally bounded rather than an assertion that every historical XGID/GNUID variant or every engine configuration is supported.
+`0.4.0` is the configurable-profile release line. It preserves the `0.3.0` legacy one-ply compatibility objects while adding fail-closed configurable 1-4 ply campaign profiles and candidate-level actual-depth evidence.
 
-Release validation covers package build and metadata checks, clean wheel and source-distribution installation, public exports, schemas, representative identifier/API behavior, deterministic CLI behavior, and the full Python test suite.
+Release validation covers package build and metadata checks, clean wheel and source-distribution installation, public exports, schemas, representative identifier/API behavior, deterministic CLI behavior, the higher-ply configuration tests, and the full Python test suite.
 
-See [`CHANGELOG.md`](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/master/CHANGELOG.md) for notable release changes.
+See [`CHANGELOG.md`](https://github.com/backgammonsimplified/backgammon-engine-kit/blob/release/v0.4.0/CHANGELOG.md) for notable release changes.
 
 ## Contributing
 

@@ -13,7 +13,7 @@ from ..models import (
     MoveFilter,
     OutcomeProbabilities,
 )
-from .config import gnu_configuration_settings
+from .config import GNU_NORMAL_MOVE_FILTER_PROFILE, gnu_configuration_settings
 
 
 _CHECKER_HEADER = re.compile(
@@ -66,9 +66,34 @@ def _require_identity(request, output):
         raise MalformedRawResponse("GNU cube output unexpectedly contains checker dice")
 
 
-def _evaluation_is_verified(output, checker_plies, cube_plies, threads):
+def _normal_move_filter_is_verified(output):
+    normalized = "\n".join(line.strip() for line in output.splitlines())
+    required_blocks = (
+        "Move filter for 1 ply:\n"
+        "keep the first 0 0-ply moves and up to 8 more moves within equity 0.16",
+        "Move filter for 2 ply:\n"
+        "keep the first 0 0-ply moves and up to 8 more moves within equity 0.16\n"
+        "Skip pruning for 1-ply moves.",
+        "Move filter for 3 ply:\n"
+        "keep the first 0 0-ply moves and up to 8 more moves within equity 0.16\n"
+        "Skip pruning for 1-ply moves.\n"
+        "keep the first 0 2-ply moves and up to 2 more moves within equity 0.04",
+        "Move filter for 4 ply:\n"
+        "keep the first 0 0-ply moves and up to 8 more moves within equity 0.16\n"
+        "Skip pruning for 1-ply moves.\n"
+        "keep the first 0 2-ply moves and up to 2 more moves within equity 0.04\n"
+        "Skip pruning for 3-ply moves.",
+    )
+    return all(block in normalized for block in required_blocks)
+
+
+def _evaluation_is_verified(output, checker_plies, cube_plies, threads, move_filter_profile):
     rejected = ("Unknown keyword", "You must set", "Error:")
     if any(marker in output for marker in rejected):
+        return False
+    if move_filter_profile != GNU_NORMAL_MOVE_FILTER_PROFILE:
+        return False
+    if not _normal_move_filter_is_verified(output):
         return False
     thread_marker = "{} calculation thread{}.".format(threads, "" if threads == 1 else "s")
     required = (
@@ -78,7 +103,6 @@ def _evaluation_is_verified(output, checker_plies, cube_plies, threads):
         "will use deterministic noise.",
         "will use noiseless evaluations.",
         "will not use pruning.",
-        "keep the first 0 0-ply moves and up to 8 more moves within equity 0.16",
         thread_marker,
         "Game winning chances will be shown as probabilities.",
         "Match evaluations will be shown as equivalent money equity.",
@@ -87,7 +111,7 @@ def _evaluation_is_verified(output, checker_plies, cube_plies, threads):
 
 
 class GnuTextParser(EngineOutputParser):
-    """Strictly parse evidenced checker/cube layouts and verify actual depth."""
+    """Parse GNU hint output and distinguish configured from per-move depth."""
 
     def parse(self, request, raw_source, started_at=None, completed_at=None):
         output = raw_source.inline
@@ -101,6 +125,7 @@ class GnuTextParser(EngineOutputParser):
             settings["checker_plies"],
             settings["cube_plies"],
             settings["threads"],
+            settings["move_filter_profile"],
         ):
             raise MalformedRawResponse("GNU output does not verify the pinned evaluation profile")
         if request.decision_type == "checker":
@@ -125,7 +150,7 @@ class GnuTextParser(EngineOutputParser):
             completed_at=completed_at,
         )
 
-    def _parse_checker(self, output, expected_ply):
+    def _parse_checker(self, output, configured_ply):
         lines = output.splitlines()
         candidates = []
         for index, line in enumerate(lines):
@@ -140,8 +165,8 @@ class GnuTextParser(EngineOutputParser):
             rank = int(header.group(1))
             raw_notation = header.group(4).strip()
             candidate_ply = int(header.group(3))
-            if candidate_ply > expected_ply:
-                raise MalformedRawResponse("GNU checker candidate depth exceeds the requested profile")
+            if candidate_ply > configured_ply:
+                raise MalformedRawResponse("GNU checker candidate depth exceeds the configured profile")
             candidates.append(
                 CheckerCandidate(
                     move_id="gnu-move-{}".format(rank),
@@ -163,9 +188,15 @@ class GnuTextParser(EngineOutputParser):
         if [candidate.rank for candidate in candidates] != list(range(1, len(candidates) + 1)):
             raise MalformedRawResponse("GNU checker candidate ranks are not contiguous")
         actual_ply = candidates[0].actual_ply
-        if actual_ply != expected_ply:
-            raise MalformedRawResponse("GNU checker recommended move depth differs from the requested profile")
         cubeful = candidates[0].cubeful
+        warnings = [
+            "GNU hint output does not identify a previously played move; is_played_move remains null",
+            "resulting Position IDs were not generated; resulting_position_id remains null",
+        ]
+        if actual_ply < configured_ply:
+            warnings.append(
+                "GNU Normal move filters stopped the recommended move below the configured checker depth; actual_ply preserves the emitted per-move depth"
+            )
         return (
             CheckerDecision(
                 candidates=tuple(candidates),
@@ -177,10 +208,7 @@ class GnuTextParser(EngineOutputParser):
                 exported_candidate_count=len(candidates),
                 move_filter=MoveFilter(1, 0, 8, 0.160),
             ),
-            (
-                "GNU hint output does not identify a previously played move; is_played_move remains null",
-                "resulting Position IDs were not generated; resulting_position_id remains null",
-            ),
+            tuple(warnings),
         )
 
     def _parse_cube(self, output, expected_ply):

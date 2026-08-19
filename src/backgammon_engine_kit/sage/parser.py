@@ -260,8 +260,13 @@ class SageJsonParser(EngineOutputParser):
             if item["notation_source"] != "bgsage.possible_single_die_moves-v1":
                 raise MalformedRawResponse("BGSage checker notation source is unrecognized")
             candidate_ply = _ply(item["eval_level"])
-            if candidate_ply != expected_ply:
-                raise MalformedRawResponse("BGSage checker candidate depth differs from the requested profile")
+            if expected_ply == 1:
+                if candidate_ply != 1:
+                    raise MalformedRawResponse("BGSage 1-ply checker candidate depth changed")
+            elif candidate_ply not in (1, expected_ply):
+                raise MalformedRawResponse(
+                    "BGSage multi-ply checker candidate depth is inconsistent with filtering"
+                )
             candidates.append(
                 CheckerCandidate(
                     move_id="sage-move-{}-{}".format(expected_rank, stable_hash(board)[:12]),
@@ -278,6 +283,24 @@ class SageJsonParser(EngineOutputParser):
                     cubeful=True,
                 )
             )
+        if candidates[0].actual_ply != expected_ply:
+            raise MalformedRawResponse(
+                "BGSage checker recommended move depth differs from the requested profile"
+            )
+        if expected_ply > 1 and len(candidates) > 1 and candidates[1].actual_ply != expected_ply:
+            raise MalformedRawResponse(
+                "BGSage checker second-best move was not promoted to the requested profile"
+            )
+        warnings = [
+            "BGSage emits no textual move notation; normalized notation is reconstructed by its legal single-die move generator and raw_notation remains null",
+            "BGSage emits five probability fields; the unavailable aggregate lose probability remains null",
+            "BGSage did not identify a played move or resulting position identifier; those fields remain null",
+            "cubeless candidate equity and emitted candidate boards remain available in the immutable raw source",
+        ]
+        if expected_ply > 1 and any(candidate.actual_ply == 1 for candidate in candidates):
+            warnings.append(
+                "BGSage multi-ply checker filtering leaves lower-ranked filtered candidates at 1-ply; each candidate actual_ply preserves its emitted depth"
+            )
         return (
             CheckerDecision(
                 candidates=tuple(candidates),
@@ -289,12 +312,7 @@ class SageJsonParser(EngineOutputParser):
                 exported_candidate_count=len(candidates),
                 move_filter=None,
             ),
-            (
-                "BGSage emits no textual move notation; normalized notation is reconstructed by its legal single-die move generator and raw_notation remains null",
-                "BGSage emits five probability fields; the unavailable aggregate lose probability remains null",
-                "BGSage did not identify a played move or resulting position identifier; those fields remain null",
-                "cubeless candidate equity and emitted candidate boards remain available in the immutable raw source",
-            ),
+            tuple(warnings),
         )
 
     def _parse_cube(self, analysis, expected_ply):

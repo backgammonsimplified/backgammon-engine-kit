@@ -8,6 +8,21 @@ from .config import gnu_configuration_settings, verified_gnu_configuration
 CHECKER_CANDIDATE_LIMIT = 8
 MOVE_FILTER = (1, 0, 8, 0.160)
 
+# Exact GNU Normal move filters used by the pinned executable and by the
+# historical match runner when it changed plies without overriding filters.
+_NORMAL_MOVE_FILTER_ROWS = (
+    (1, 0, 0, 8, 0.160),
+    (2, 0, 0, 8, 0.160),
+    (2, 1, -1, 0, 0.0),
+    (3, 0, 0, 8, 0.160),
+    (3, 1, -1, 0, 0.0),
+    (3, 2, 0, 2, 0.040),
+    (4, 0, 0, 8, 0.160),
+    (4, 1, -1, 0, 0.0),
+    (4, 2, 0, 2, 0.040),
+    (4, 3, -1, 0, 0.0),
+)
+
 
 @dataclass(frozen=True)
 class GnuInvocation:
@@ -23,12 +38,27 @@ class GnuInvocation:
         return values
 
 
+def _normal_move_filter_commands():
+    commands = []
+    for target_ply, sub_ply, accept, extra, threshold in _NORMAL_MOVE_FILTER_ROWS:
+        commands.append(
+            "set evaluation movefilter {} {} {} {} {:.3f}".format(
+                target_ply,
+                sub_ply,
+                accept,
+                extra,
+                threshold,
+            )
+        )
+    return commands
+
+
 def _common_commands(configuration=None):
     settings = gnu_configuration_settings(configuration or verified_gnu_configuration())
     checker_plies = settings["checker_plies"]
     cube_plies = settings["cube_plies"]
     threads = settings["threads"]
-    return [
+    commands = [
         "set confirm new off",
         "set confirm save off",
         "set player 0 name player0",
@@ -55,8 +85,13 @@ def _common_commands(configuration=None):
         "set evaluation cubedecision evaluation deterministic on",
         "set evaluation cubedecision evaluation noise 0",
         "set evaluation cubedecision evaluation prune off",
-        "set evaluation movefilter 1 0 0 8 0.160",
     ]
+    if settings["legacy"]:
+        # Preserve the exact v0.3.0 command stream for the legacy 1-ply profile.
+        commands.append("set evaluation movefilter 1 0 0 8 0.160")
+    else:
+        commands.extend(_normal_move_filter_commands())
+    return commands
 
 
 def build_invocation(request, runtime):

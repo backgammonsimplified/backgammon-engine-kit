@@ -29,9 +29,11 @@ gnu = gnu_configuration(checker_plies=3, cube_plies=2)
 
 The original `verified_sage_configuration()` and `verified_gnu_configuration()` remain the exact v0.3.0 1-ply configurations for compatibility.
 
-## Evidence gate
+## Runtime configuration versus retained evidence
 
-Configuration is composable, but support remains evidence-gated by decision type. The current retained evidence supports:
+Numeric 1-ply through 4-ply checker and cube settings are independently configurable for Sage and GNU. A new benchmark can therefore pin a different numeric checker/cube combination without requiring another Engine Kit source change.
+
+Configuration does not imply that a setting has already passed a project commissioning smoke. `capability_report().supports(...)` remains a conservative retained-evidence signal. Current retained evidence includes:
 
 ```text
 Sage checker: 1ply, 4ply
@@ -40,9 +42,9 @@ GNU checker:  1ply, 3ply
 GNU cube:     1ply, 2ply
 ```
 
-An unsupported decision/depth combination is rejected before engine execution. Adding another setting requires evidence and a capability update, not a Benchmarker-local workaround.
+Other numeric 1-4 ply combinations may be configured for a bounded commissioning run. They are not treated as previously verified merely because they can be represented.
 
-For every accepted request, the adapter also verifies the engine-reported actual evaluation depth. A request fails closed if actual depth differs from the pinned request.
+For every real request, the adapter verifies the engine-reported actual evaluation depth. A result fails closed if actual depth differs from the pinned request, or if runtime binary/model/resource identity differs from the pinned Engine Kit authority. Settings outside the currently supported numeric 1-4 ply surface remain rejected.
 
 ## Ownership boundary with Benchmarker
 
@@ -64,4 +66,4 @@ Artifact repository/root
   -> remains separate from Engine Kit source and disposable runner environments
 ```
 
-Engine Kit should therefore remain reusable across benchmark campaigns. Benchmarker chooses and freezes an Engine Kit profile; Engine Kit translates that profile into exact engine commands/protocol requests and verifies the resulting engine output.
+Engine Kit should therefore remain reusable across benchmark campaigns. Benchmarker chooses and freezes an Engine Kit profile; Engine Kit translates that profile into exact engine commands/protocol requests and verifies the resulting engine output. Runtime paths are execution details and must not become part of the public configuration identity.

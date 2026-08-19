@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from .config import gnu_configuration_settings, verified_gnu_configuration
+
 
 CHECKER_CANDIDATE_LIMIT = 8
 MOVE_FILTER = (1, 0, 8, 0.160)
@@ -21,7 +23,11 @@ class GnuInvocation:
         return values
 
 
-def _common_commands():
+def _common_commands(configuration=None):
+    settings = gnu_configuration_settings(configuration or verified_gnu_configuration())
+    checker_plies = settings["checker_plies"]
+    cube_plies = settings["cube_plies"]
+    threads = settings["threads"]
     return [
         "set confirm new off",
         "set confirm save off",
@@ -31,20 +37,20 @@ def _common_commands():
         "set cube use on",
         "set jacoby off",
         "set beavers 0",
-        "set threads 1",
+        "set threads {}".format(threads),
         "set output digits 6",
         "set output winpc off",
         "set output matchpc off",
         "set output mwc off",
         "set output rawboard off",
         "set evaluation chequerplay type evaluation",
-        "set evaluation chequerplay evaluation plies 1",
+        "set evaluation chequerplay evaluation plies {}".format(checker_plies),
         "set evaluation chequerplay evaluation cubeful on",
         "set evaluation chequerplay evaluation deterministic on",
         "set evaluation chequerplay evaluation noise 0",
         "set evaluation chequerplay evaluation prune off",
         "set evaluation cubedecision type evaluation",
-        "set evaluation cubedecision evaluation plies 1",
+        "set evaluation cubedecision evaluation plies {}".format(cube_plies),
         "set evaluation cubedecision evaluation cubeful on",
         "set evaluation cubedecision evaluation deterministic on",
         "set evaluation cubedecision evaluation noise 0",
@@ -56,7 +62,7 @@ def _common_commands():
 def build_invocation(request, runtime):
     if request.position.format != "gnuid" or request.position.id is None:
         raise ValueError("GNU adapter requires a verified combined GNU ID")
-    commands = _common_commands()
+    commands = _common_commands(request.configuration)
     commands.extend(
         [
             "set gnubgid " + request.position.id,
@@ -93,12 +99,7 @@ def build_invocation(request, runtime):
 
 
 def verified_source_id(position, source, expected_semantic_hash=None, invocation_settings=None):
-    """Adapter-boundary seam for guarded reuse of a preserved combined GNU ID.
-
-    The legacy request path remains unchanged in this bounded milestone. New
-    canonical callers must pass through this guard before constructing a GNU
-    command.
-    """
+    """Adapter-boundary seam for guarded reuse of a preserved combined GNU ID."""
     from ..position_contract.gnu_bridge import verify_gnu_source_bridge
 
     return verify_gnu_source_bridge(

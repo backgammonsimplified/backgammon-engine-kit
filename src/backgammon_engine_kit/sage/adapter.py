@@ -1,4 +1,4 @@
-"""Evidence-gated BGSage 1-ply checker/cube adapter."""
+"""Evidence-gated BGSage checker/cube adapter."""
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,7 +14,14 @@ from ..adapters import (
 )
 from ..models import RawSource
 from ..process import run_process
-from .config import SAGE_ENGINE_VERSION, SAGE_MODEL_IDENTITY, SAGE_PROTOCOL_VERSION, verified_sage_configuration
+from .config import (
+    SAGE_ENGINE_VERSION,
+    SAGE_MODEL_IDENTITY,
+    SAGE_PROTOCOL_VERSION,
+    SAGE_SUPPORTED_CHECKER_SETTINGS,
+    SAGE_SUPPORTED_CUBE_SETTINGS,
+    sage_configuration_settings,
+)
 from .invocation import build_invocation, identity_invocation
 from .parser import SageJsonParser
 
@@ -47,14 +54,35 @@ class SageAdapter(EngineAdapter):
     def _validate_request(self, request):
         if request.engine != "sage":
             raise UnsupportedCapability("Sage adapter received a request for another engine")
-        if request.analysis_setting != "1ply":
-            raise UnsupportedCapability("Sage evidence supports only the 1ply analysis setting")
         if request.decision_type not in ("checker", "cube"):
             raise UnsupportedCapability("Sage evidence supports only checker and cube decisions")
+        supported = (
+            SAGE_SUPPORTED_CHECKER_SETTINGS
+            if request.decision_type == "checker"
+            else SAGE_SUPPORTED_CUBE_SETTINGS
+        )
+        if request.analysis_setting not in supported:
+            raise UnsupportedCapability(
+                "Sage evidence does not support {} {}".format(
+                    request.analysis_setting,
+                    request.decision_type,
+                )
+            )
         if request.position.format != "gnuid":
             raise UnsupportedCapability("Sage evidence requires a verified combined GNU ID")
-        if request.configuration != verified_sage_configuration():
-            raise ConfigurationMismatch("Sage request configuration identity differs from verified evidence")
+        try:
+            settings = sage_configuration_settings(request.configuration)
+        except ValueError as exc:
+            raise ConfigurationMismatch(str(exc))
+        expected_setting = (
+            settings["checker_setting"]
+            if request.decision_type == "checker"
+            else settings["cube_setting"]
+        )
+        if request.analysis_setting != expected_setting:
+            raise ConfigurationMismatch(
+                "Sage request setting does not match the pinned checker/cube profile"
+            )
 
     def _validate_runtime(self):
         try:

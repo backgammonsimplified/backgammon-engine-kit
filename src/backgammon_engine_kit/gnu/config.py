@@ -26,6 +26,12 @@ GNU_MODEL_IDENTITY = ";".join(
     "{}:sha256:{}".format(name, digest) for name, digest in RESOURCE_IDENTITIES
 )
 
+# Decision-specific settings with retained execution evidence. The 20-match
+# Sage-vs-GNU trial used checker 3-ply and cube 2-ply. The original Engine Kit
+# evidence covers checker/cube 1-ply.
+GNU_SUPPORTED_CHECKER_PLIES = frozenset((1, 3))
+GNU_SUPPORTED_CUBE_PLIES = frozenset((1, 2))
+
 
 def file_sha256(path):
     digest = hashlib.sha256()
@@ -39,7 +45,7 @@ def file_sha256(path):
 
 
 def verified_gnu_configuration():
-    """Return the exact public configuration supported by committed evidence."""
+    """Return the original v0.3.0 1-ply configuration unchanged."""
     return EngineConfiguration(
         engine="gnu",
         profile=GNU_PROFILE,
@@ -64,6 +70,77 @@ def verified_gnu_configuration():
             ("variation", "standard"),
         ),
     )
+
+
+def _validate_positive_int(value, label):
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError("{} must be a positive integer".format(label))
+
+
+def gnu_configuration(checker_plies=1, cube_plies=1, threads=1):
+    """Build an evidence-gated GNU profile with independent checker/cube depth."""
+    if checker_plies not in GNU_SUPPORTED_CHECKER_PLIES:
+        raise ValueError("unsupported evidenced GNU checker plies: {}".format(checker_plies))
+    if cube_plies not in GNU_SUPPORTED_CUBE_PLIES:
+        raise ValueError("unsupported evidenced GNU cube plies: {}".format(cube_plies))
+    _validate_positive_int(threads, "threads")
+    if checker_plies == 1 and cube_plies == 1 and threads == 1:
+        return verified_gnu_configuration()
+    profile = "gnu-1.08.003-checker-{}ply-cube-{}ply-cubeful-noiseless".format(
+        checker_plies,
+        cube_plies,
+    )
+    return EngineConfiguration(
+        engine="gnu",
+        profile=profile,
+        engine_version=GNU_ENGINE_VERSION,
+        model_or_weights_identity=GNU_MODEL_IDENTITY,
+        invocation_identity=GNU_INVOCATION_IDENTITY,
+        parser_version=GNU_PARSER_VERSION,
+        options=(
+            ("actual_evaluation_type", "evaluation"),
+            ("beavers", 0),
+            ("checker_evaluation_plies", checker_plies),
+            ("cube_evaluation_plies", cube_plies),
+            ("cubeful", True),
+            ("deterministic", True),
+            ("jacoby", False),
+            ("move_filter", "1:0:0:8:0.160"),
+            ("noise", 0.0),
+            ("output_digits", 6),
+            ("output_mwc", False),
+            ("output_winpc", False),
+            ("pruning", False),
+            ("threads", threads),
+            ("variation", "standard"),
+        ),
+    )
+
+
+def gnu_configuration_settings(configuration):
+    """Validate a GNU configuration and return its executable settings."""
+    if configuration == verified_gnu_configuration():
+        return {"checker_plies": 1, "cube_plies": 1, "threads": 1, "legacy": True}
+    options = dict(configuration.options)
+    try:
+        checker_plies = options["checker_evaluation_plies"]
+        cube_plies = options["cube_evaluation_plies"]
+        threads = options["threads"]
+    except KeyError as exc:
+        raise ValueError("GNU configuration lacks configurable profile settings") from exc
+    expected = gnu_configuration(
+        checker_plies=checker_plies,
+        cube_plies=cube_plies,
+        threads=threads,
+    )
+    if configuration != expected:
+        raise ValueError("GNU configuration identity differs from an evidenced profile")
+    return {
+        "checker_plies": checker_plies,
+        "cube_plies": cube_plies,
+        "threads": threads,
+        "legacy": False,
+    }
 
 
 @dataclass(frozen=True)

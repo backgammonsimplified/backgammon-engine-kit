@@ -1,4 +1,4 @@
-"""Parser for the two verified GNU 1.08.003 `hint` transcript forms."""
+"""Parser for verified GNU 1.08.003 `hint` transcript forms."""
 
 import re
 
@@ -13,6 +13,7 @@ from ..models import (
     MoveFilter,
     OutcomeProbabilities,
 )
+from .config import gnu_configuration_settings
 
 
 _CHECKER_HEADER = re.compile(
@@ -44,6 +45,13 @@ def _probabilities(match):
     )
 
 
+def _expected_ply(request):
+    try:
+        return int(request.analysis_setting[:-3])
+    except (TypeError, ValueError):
+        raise MalformedRawResponse("GNU request has an unsupported evaluation depth")
+
+
 def _require_identity(request, output):
     position_id, match_id = request.position.id.split(":", 1)
     if "Position ID: {}".format(position_id) not in output:
@@ -58,18 +66,19 @@ def _require_identity(request, output):
         raise MalformedRawResponse("GNU cube output unexpectedly contains checker dice")
 
 
-def _evaluation_is_verified(output):
+def _evaluation_is_verified(output, expected_ply, threads):
     rejected = ("Unknown keyword", "You must set", "Error:")
     if any(marker in output for marker in rejected):
         return False
+    thread_marker = "{} calculation thread{}.".format(threads, "" if threads == 1 else "s")
     required = (
-        "will use 1 ply evaluation.",
+        "will use {} ply evaluation.".format(expected_ply),
         "will use cubeful evaluation.",
         "will use deterministic noise.",
         "will use noiseless evaluations.",
         "will not use pruning.",
         "keep the first 0 0-ply moves and up to 8 more moves within equity 0.16",
-        "1 calculation thread.",
+        thread_marker,
         "Game winning chances will be shown as probabilities.",
         "Match evaluations will be shown as equivalent money equity.",
     )
@@ -77,20 +86,22 @@ def _evaluation_is_verified(output):
 
 
 class GnuTextParser(EngineOutputParser):
-    """Strictly parse only the checker and cube layouts retained as evidence."""
+    """Strictly parse evidenced checker/cube layouts and verify actual depth."""
 
     def parse(self, request, raw_source, started_at=None, completed_at=None):
         output = raw_source.inline
         if output is None:
             raise MalformedRawResponse("GNU parser requires immutable inline output")
         _require_identity(request, output)
-        if not _evaluation_is_verified(output):
-            raise MalformedRawResponse("GNU output does not verify the configured 1-ply evaluation")
+        settings = gnu_configuration_settings(request.configuration)
+        expected_ply = _expected_ply(request)
+        if not _evaluation_is_verified(output, expected_ply, settings["threads"]):
+            raise MalformedRawResponse("GNU output does not verify the pinned evaluation profile")
         if request.decision_type == "checker":
-            decision, warnings = self._parse_checker(output)
+            decision, warnings = self._parse_checker(output, expected_ply)
             checker_decision, cube_decision = decision, None
         else:
-            decision, warnings = self._parse_cube(output)
+            decision, warnings = self._parse_cube(output, expected_ply)
             checker_decision, cube_decision = None, decision
         return AnalysisResult(
             position=request.position,
@@ -108,7 +119,7 @@ class GnuTextParser(EngineOutputParser):
             completed_at=completed_at,
         )
 
-    def _parse_checker(self, output):
+    def _parse_checker(self, output, expected_ply):
         lines = output.splitlines()
         candidates = []
         for index, line in enumerate(lines):
@@ -122,6 +133,9 @@ class GnuTextParser(EngineOutputParser):
                 raise MalformedRawResponse("GNU checker probabilities are malformed")
             rank = int(header.group(1))
             raw_notation = header.group(4).strip()
+            candidate_ply = int(header.group(3))
+            if candidate_ply != expected_ply:
+                raise MalformedRawResponse("GNU checker actual depth differs from the requested profile")
             candidates.append(
                 CheckerCandidate(
                     move_id="gnu-move-{}".format(rank),
@@ -132,7 +146,7 @@ class GnuTextParser(EngineOutputParser):
                     equity=float(header.group(5)),
                     equity_difference=(float(header.group(6)) if header.group(6) is not None else None),
                     probabilities=_probabilities(chance),
-                    actual_ply=int(header.group(3)),
+                    actual_ply=candidate_ply,
                     resulting_position_id=None,
                     cubeful=header.group(2) == "Cubeful",
                 )
@@ -161,7 +175,7 @@ class GnuTextParser(EngineOutputParser):
             ),
         )
 
-    def _parse_cube(self, output):
+    def _parse_cube(self, output, expected_ply):
         lines = output.splitlines()
         cubeless_equity = None
         probabilities = None
@@ -173,6 +187,8 @@ class GnuTextParser(EngineOutputParser):
             cubeless = _CUBELESS.match(line)
             if cubeless is not None:
                 actual_ply = int(cubeless.group(1))
+                if actual_ply != expected_ply:
+                    raise MalformedRawResponse("GNU cube actual depth differs from the requested profile")
                 cubeless_equity = float(cubeless.group(2))
                 if index + 1 >= len(lines):
                     raise MalformedRawResponse("GNU cube output lacks probabilities")
@@ -223,6 +239,7 @@ class GnuTextParser(EngineOutputParser):
                 actions=tuple(actions),
                 recommended_action_id=recommended_action_id,
                 gnu_recommendation=recommendation,
+                raw_recommendation=recommendation,
                 actual_evaluation_type="evaluation",
                 actual_ply=actual_ply,
                 cubeful=True,

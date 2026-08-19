@@ -140,8 +140,8 @@ class GnuTextParser(EngineOutputParser):
             rank = int(header.group(1))
             raw_notation = header.group(4).strip()
             candidate_ply = int(header.group(3))
-            if candidate_ply != expected_ply:
-                raise MalformedRawResponse("GNU checker actual depth differs from the requested profile")
+            if candidate_ply > expected_ply:
+                raise MalformedRawResponse("GNU checker candidate depth exceeds the requested profile")
             candidates.append(
                 CheckerCandidate(
                     move_id="gnu-move-{}".format(rank),
@@ -163,6 +163,8 @@ class GnuTextParser(EngineOutputParser):
         if [candidate.rank for candidate in candidates] != list(range(1, len(candidates) + 1)):
             raise MalformedRawResponse("GNU checker candidate ranks are not contiguous")
         actual_ply = candidates[0].actual_ply
+        if actual_ply != expected_ply:
+            raise MalformedRawResponse("GNU checker recommended move depth differs from the requested profile")
         cubeful = candidates[0].cubeful
         return (
             CheckerDecision(
@@ -245,7 +247,6 @@ class GnuTextParser(EngineOutputParser):
                 actions=tuple(actions),
                 recommended_action_id=recommended_action_id,
                 gnu_recommendation=recommendation,
-                raw_recommendation=recommendation,
                 actual_evaluation_type="evaluation",
                 actual_ply=actual_ply,
                 cubeful=True,

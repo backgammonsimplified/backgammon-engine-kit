@@ -21,11 +21,11 @@ SAGE_NATIVE_SHA256 = "1b0449938243478916f2ab459b8525a7b9d8f73c3f74fbc5f43a34c1d7
 SAGE_PYTHON_SHA256 = "6d972cf21be56fe3c947ab6ba257ff8d08c342dd2714442986791bd9a6dfabfe"
 SAGE_GNUID_PARSER_SHA256 = "fadf04cc08033a297c683a3d8ccc9c53bcfae4743cffe6e0c8d6e3e5d014436c"
 
-# Decision-specific settings with retained execution evidence. The 20-match
-# Sage-vs-GNU trial used checker 4ply and cube 3ply. The original Engine Kit
-# evidence covers checker/cube 1ply.
-SAGE_SUPPORTED_CHECKER_SETTINGS = frozenset(("1ply", "4ply"))
-SAGE_SUPPORTED_CUBE_SETTINGS = frozenset(("1ply", "3ply"))
+# Engine Kit can represent and runtime-verify numeric BGSage levels without a
+# source change for every benchmark. Pre-existing retained evidence is narrower
+# and is reported separately by capability_report().
+SAGE_SUPPORTED_CHECKER_SETTINGS = frozenset(("1ply", "2ply", "3ply", "4ply"))
+SAGE_SUPPORTED_CUBE_SETTINGS = frozenset(("1ply", "2ply", "3ply", "4ply"))
 
 
 def file_sha256(path):
@@ -89,16 +89,21 @@ def sage_configuration(
     parallel_threads=1,
     seed=42,
 ):
-    """Build an evidence-gated Sage profile with independent checker/cube depth.
+    """Build a pinned Sage profile with independent checker/cube depth.
+
+    Numeric 1-4 ply settings can be represented for commissioning without an
+    Engine Kit source change. Every real result is still fail-closed against
+    engine-reported actual depth. capability_report() distinguishes retained
+    evidence from settings that still require a runtime commissioning smoke.
 
     The legacy 1ply/1ply, one-thread, seed-42 configuration returns the exact
     v0.3.0 configuration object so existing hashes and cache identities remain
-    stable. Other accepted combinations are represented explicitly in options.
+    stable.
     """
     if checker_setting not in SAGE_SUPPORTED_CHECKER_SETTINGS:
-        raise ValueError("unsupported evidenced Sage checker setting: {}".format(checker_setting))
+        raise ValueError("unsupported Sage checker setting: {}".format(checker_setting))
     if cube_setting not in SAGE_SUPPORTED_CUBE_SETTINGS:
-        raise ValueError("unsupported evidenced Sage cube setting: {}".format(cube_setting))
+        raise ValueError("unsupported Sage cube setting: {}".format(cube_setting))
     _validate_positive_int(parallel_threads, "parallel_threads")
     if not isinstance(seed, int) or isinstance(seed, bool):
         raise ValueError("seed must be an integer")
@@ -161,7 +166,7 @@ def sage_configuration_settings(configuration):
         seed=seed,
     )
     if configuration != expected:
-        raise ValueError("Sage configuration identity differs from an evidenced profile")
+        raise ValueError("Sage configuration identity differs from the pinned profile")
     return {
         "checker_setting": checker_setting,
         "cube_setting": cube_setting,

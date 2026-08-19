@@ -72,7 +72,7 @@ def test_capability_report_enables_only_evidenced_gnu_setting():
 
 def test_unsupported_gnu_analysis_setting_fails_before_execution():
     adapter = GnuAdapter(FakeRuntime(), process_runner=lambda *args, **kwargs: None)
-    response = AnalysisService(adapters={"gnu": adapter}).analyze(gnu_request(setting="2ply"))
+    response = AnalysisService(adapters={"gnu": adapter}).analyze(gnu_request(setting="rollout"))
     assert response.result.failure.code == "unsupported_capability"
 
 

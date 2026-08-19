@@ -1,0 +1,168 @@
+name: Engine Kit 0.4.0 release
+
+on:
+  push:
+    branches:
+      - release/v0.4.0
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out release branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install release tooling
+        run: |
+          python -m pip install --upgrade 'pip>=25,<27'
+          python -m pip install 'build>=1.2,<2' 'pip-tools>=7,<8' 'pytest>=8,<9' 'twine>=5,<7'
+          python -m pip --version
+          python -m build --version
+          pip-compile --version
+          python -m twine --version
+
+      - name: Run full test suite
+        run: python -m pytest
+
+      - name: Build wheel and source distribution
+        run: |
+          rm -rf build dist
+          python -m build
+          python -m twine check dist/*
+
+      - name: Create production dependency lock when absent
+        id: lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f requirements-production.lock ]]; then
+            echo 'created=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pip-compile \
+            --generate-hashes \
+            --resolver=backtracking \
+            --strip-extras \
+            --output-file=requirements-production.lock \
+            requirements-production.in
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add requirements-production.lock
+          git commit -m 'Lock Engine Kit 0.4.0 production dependencies'
+          git push origin HEAD:release/v0.4.0
+          echo 'created=true' >> "$GITHUB_OUTPUT"
+
+      - name: Stop first pass after committing lock
+        if: steps.lock.outputs.created == 'true'
+        run: echo 'Production dependency lock committed; the follow-up push will perform final release validation.'
+
+      - name: Verify locked clean installation
+        if: steps.lock.outputs.created != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/engine-kit-release-verify
+          /tmp/engine-kit-release-verify/bin/python -m pip install --upgrade 'pip>=25,<27'
+          /tmp/engine-kit-release-verify/bin/python -m pip install --require-hashes -r requirements-production.lock
+          wheel=(dist/backgammon_engine_kit-0.4.0-*.whl)
+          [[ ${#wheel[@]} -eq 1 && -f "${wheel[0]}" ]]
+          /tmp/engine-kit-release-verify/bin/python -m pip install --no-deps "${wheel[0]}"
+          /tmp/engine-kit-release-verify/bin/python -m pip check
+          /tmp/engine-kit-release-verify/bin/python - <<'PY'
+          import backgammon_engine_kit as kit
+          from backgammon_engine_kit.gnu import gnu_configuration
+          from backgammon_engine_kit.sage import sage_configuration
+          assert kit.__version__ == '0.4.0'
+          sage = sage_configuration(checker_setting='4ply', cube_setting='3ply', parallel_threads=1, seed=42)
+          gnu = gnu_configuration(checker_plies=3, cube_plies=2, threads=1)
+          assert dict(sage.options)['checker_analysis_setting'] == '4ply'
+          assert dict(sage.options)['cube_analysis_setting'] == '3ply'
+          assert dict(gnu.options)['checker_evaluation_plies'] == 3
+          assert dict(gnu.options)['cube_evaluation_plies'] == 2
+          assert dict(gnu.options)['checker_move_filter_profile'].startswith('normal-v1;')
+          print('RELEASE_INSTALL_SMOKE=PASS')
+          PY
+
+      - name: Build immutable release manifest
+        if: steps.lock.outputs.created != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          def sha256(path: Path) -> str:
+              h = hashlib.sha256()
+              with path.open('rb') as f:
+                  for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          dist = Path('dist')
+          artifacts = {
+              p.name: sha256(p)
+              for p in sorted(dist.iterdir())
+              if p.is_file()
+          }
+          lock = Path('requirements-production.lock')
+          manifest = {
+              'schema_version': 'backgammon-engine-kit-release-manifest-v1',
+              'version': '0.4.0',
+              'tag': 'v0.4.0',
+              'release_commit': os.environ['GITHUB_SHA'],
+              'validated_configurable_profile_source_base': '833929ea72ccec058527f3cd1fa0b54a07ac666b',
+              'artifacts': artifacts,
+              'production_dependency_lock': {
+                  'filename': lock.name,
+                  'sha256': sha256(lock),
+                  'target_runtime': 'CPython 3.11 / Linux x86_64 campaign runner',
+              },
+          }
+          Path('release-manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+          lines = [f"{digest}  {name}" for name, digest in sorted(artifacts.items())]
+          lines.append(f"{sha256(lock)}  {lock.name}")
+          lines.append(f"{sha256(Path('release-manifest.json'))}  release-manifest.json")
+          Path('release-manifest.sha256').write_text('\n'.join(lines) + '\n')
+          print(json.dumps(manifest, sort_keys=True))
+          PY
+          cat release-manifest.sha256
+
+      - name: Create immutable v0.4.0 tag and GitHub release
+        if: steps.lock.outputs.created != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify refs/tags/v0.4.0 >/dev/null; then
+            test "$(git rev-list -n1 v0.4.0)" = "$GITHUB_SHA"
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag -a v0.4.0 -m 'Backgammon Engine Kit 0.4.0'
+            git push origin refs/tags/v0.4.0
+          fi
+          if gh release view v0.4.0 >/dev/null 2>&1; then
+            echo 'Release v0.4.0 already exists; refusing to rewrite it.' >&2
+            exit 1
+          fi
+          gh release create v0.4.0 \
+            dist/* \
+            requirements-production.lock \
+            release-manifest.json \
+            release-manifest.sha256 \
+            --title 'Backgammon Engine Kit 0.4.0' \
+            --notes 'Public configurable-profile release. Preserves the exact 0.3.0 one-ply compatibility objects and adds fail-closed configurable 1-4 ply Sage/GNU profiles. The production-commissioned historical profile is Sage checker/cube 4ply/3ply and GNU checker/cube 3ply/2ply with GNU normal-v1 move filtering. Release assets include immutable wheel/sdist hashes and the production dependency lock.'

@@ -102,24 +102,43 @@ def test_gnu_trial_profile_flows_into_checker_and_cube_commands():
     assert cube.stdin_text.endswith("hint\nquit\n")
 
 
-def test_capability_report_matches_retained_trial_evidence():
+def test_numeric_one_through_four_ply_is_runtime_configurable_without_source_changes():
+    sage = sage_configuration(checker_setting="2ply", cube_setting="4ply")
+    assert dict(sage.options)["checker_analysis_setting"] == "2ply"
+    assert dict(sage.options)["cube_analysis_setting"] == "4ply"
+    checker = json.loads(
+        build_sage_invocation(sage_request("checker", "2ply", sage), SageRuntime()).stdin_text
+    )
+    cube = json.loads(
+        build_sage_invocation(sage_request("cube", "4ply", sage), SageRuntime()).stdin_text
+    )
+    assert checker["analysis"]["analysis_setting"] == "2ply"
+    assert cube["analysis"]["analysis_setting"] == "4ply"
+
+    gnu = gnu_configuration(checker_plies=2, cube_plies=4)
+    invocation = build_gnu_invocation(gnu_request("checker", "2ply", gnu), GnuRuntime())
+    assert "set evaluation chequerplay evaluation plies 2\n" in invocation.stdin_text
+    assert "set evaluation cubedecision evaluation plies 4\n" in invocation.stdin_text
+
+
+def test_capability_report_matches_retained_evidence_not_every_configurable_setting():
     report = capability_report()
     sage = report.for_engine("sage")
     gnu = report.for_engine("gnu")
     assert sage.supports("4ply", "checker") is True
     assert sage.supports("3ply", "cube") is True
-    assert sage.supports("3ply", "checker") is False
+    assert sage.supports("2ply", "checker") is False
     assert gnu.supports("3ply", "checker") is True
     assert gnu.supports("2ply", "cube") is True
-    assert gnu.supports("2ply", "checker") is False
+    assert gnu.supports("4ply", "checker") is False
 
 
-def test_unsubstantiated_depths_remain_fail_closed():
+def test_settings_outside_numeric_one_through_four_remain_fail_closed():
     with pytest.raises(ValueError, match="Sage checker"):
-        sage_configuration(checker_setting="3ply", cube_setting="3ply")
+        sage_configuration(checker_setting="rollout", cube_setting="3ply")
     with pytest.raises(ValueError, match="Sage cube"):
-        sage_configuration(checker_setting="4ply", cube_setting="4ply")
+        sage_configuration(checker_setting="4ply", cube_setting="truncated1")
     with pytest.raises(ValueError, match="GNU checker"):
-        gnu_configuration(checker_plies=2, cube_plies=2)
+        gnu_configuration(checker_plies=5, cube_plies=2)
     with pytest.raises(ValueError, match="GNU cube"):
-        gnu_configuration(checker_plies=3, cube_plies=3)
+        gnu_configuration(checker_plies=3, cube_plies=5)

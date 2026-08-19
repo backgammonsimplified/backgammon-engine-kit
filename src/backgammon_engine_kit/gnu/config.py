@@ -26,6 +26,18 @@ GNU_MODEL_IDENTITY = ";".join(
     "{}:sha256:{}".format(name, digest) for name, digest in RESOURCE_IDENTITIES
 )
 
+# The historical match runner changed checker/cube plies but did not override
+# GNU's move filters. The pinned executable therefore used its Normal move-filter
+# profile. Encode the complete profile in configurable Engine Kit identities so
+# Benchmarker does not rely on an undocumented process default.
+GNU_NORMAL_MOVE_FILTER_PROFILE = (
+    "normal-v1;"
+    "1:0=0,8,0.160;"
+    "2:0=0,8,0.160|1=skip;"
+    "3:0=0,8,0.160|1=skip|2=0,2,0.040;"
+    "4:0=0,8,0.160|1=skip|2=0,2,0.040|3=skip"
+)
+
 # Engine Kit can represent and runtime-verify GNU numeric evaluation depths
 # without a source change for every benchmark. Retained evidence is narrower
 # and is reported separately by capability_report().
@@ -81,9 +93,12 @@ def gnu_configuration(checker_plies=1, cube_plies=1, threads=1):
     """Build a pinned GNU profile with independent checker/cube depth.
 
     Numeric 1-4 ply settings can be represented for commissioning without an
-    Engine Kit source change. Every real result is still fail-closed against
-    GNU's reported effective evaluation depth. capability_report() distinguishes
-    retained evidence from settings that still require a runtime smoke.
+    Engine Kit source change. Checker ``plies`` configure GNU's search target;
+    the Normal move filter may leave individual moves evaluated at a shallower
+    depth when deeper work is unnecessary. The parser therefore verifies the
+    configured profile from ``show evaluation`` and preserves each candidate's
+    emitted actual ply separately. capability_report() distinguishes retained
+    evidence from settings that still require a runtime smoke.
     """
     if checker_plies not in GNU_SUPPORTED_CHECKER_PLIES:
         raise ValueError("unsupported GNU checker plies: {}".format(checker_plies))
@@ -92,7 +107,7 @@ def gnu_configuration(checker_plies=1, cube_plies=1, threads=1):
     _validate_positive_int(threads, "threads")
     if checker_plies == 1 and cube_plies == 1 and threads == 1:
         return verified_gnu_configuration()
-    profile = "gnu-1.08.003-checker-{}ply-cube-{}ply-cubeful-noiseless".format(
+    profile = "gnu-1.08.003-checker-{}ply-cube-{}ply-normal-filter-cubeful-noiseless".format(
         checker_plies,
         cube_plies,
     )
@@ -107,6 +122,7 @@ def gnu_configuration(checker_plies=1, cube_plies=1, threads=1):
             ("actual_evaluation_type", "evaluation"),
             ("beavers", 0),
             ("checker_evaluation_plies", checker_plies),
+            ("checker_move_filter_profile", GNU_NORMAL_MOVE_FILTER_PROFILE),
             ("cube_evaluation_plies", cube_plies),
             ("cubeful", True),
             ("deterministic", True),
@@ -126,14 +142,23 @@ def gnu_configuration(checker_plies=1, cube_plies=1, threads=1):
 def gnu_configuration_settings(configuration):
     """Validate a GNU configuration and return its executable settings."""
     if configuration == verified_gnu_configuration():
-        return {"checker_plies": 1, "cube_plies": 1, "threads": 1, "legacy": True}
+        return {
+            "checker_plies": 1,
+            "cube_plies": 1,
+            "threads": 1,
+            "move_filter_profile": GNU_NORMAL_MOVE_FILTER_PROFILE,
+            "legacy": True,
+        }
     options = dict(configuration.options)
     try:
         checker_plies = options["checker_evaluation_plies"]
         cube_plies = options["cube_evaluation_plies"]
         threads = options["threads"]
+        move_filter_profile = options["checker_move_filter_profile"]
     except KeyError as exc:
         raise ValueError("GNU configuration lacks configurable profile settings") from exc
+    if move_filter_profile != GNU_NORMAL_MOVE_FILTER_PROFILE:
+        raise ValueError("GNU configuration uses an unsupported checker move-filter profile")
     expected = gnu_configuration(
         checker_plies=checker_plies,
         cube_plies=cube_plies,
@@ -145,6 +170,7 @@ def gnu_configuration_settings(configuration):
         "checker_plies": checker_plies,
         "cube_plies": cube_plies,
         "threads": threads,
+        "move_filter_profile": move_filter_profile,
         "legacy": False,
     }
 

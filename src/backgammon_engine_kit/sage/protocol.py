@@ -15,6 +15,8 @@ import sys
 
 PROTOCOL = "bgsage-position-analysis-v1"
 MODEL = "stage9"
+SUPPORTED_CHECKER_SETTINGS = frozenset(("1ply", "4ply"))
+SUPPORTED_CUBE_SETTINGS = frozenset(("1ply", "3ply"))
 
 
 def _canonical(data):
@@ -151,7 +153,7 @@ def _probabilities(value):
     }
 
 
-def _analyzer(bearoff):
+def _legacy_analyzer(bearoff):
     from bgsage import create_analyzer, default_weights
 
     return create_analyzer(
@@ -178,6 +180,49 @@ def _analyzer(bearoff):
     )
 
 
+def _analyzer(bearoff, analysis_setting, parallel_threads, seed):
+    if analysis_setting == "1ply" and parallel_threads == 1 and seed == 42:
+        return _legacy_analyzer(bearoff)
+    from bgsage import create_analyzer
+
+    # This mirrors the historical Sage-vs-GNU referee: the named level is
+    # passed directly to create_analyzer, with cubeful analysis, a fixed seed,
+    # explicit thread count, and the packaged bearoff database enabled.
+    return create_analyzer(
+        level=analysis_setting,
+        cubeful=True,
+        parallel_threads=parallel_threads,
+        bearoff_db=True,
+        seed=seed,
+    )
+
+
+def _analysis_configuration(analysis_setting, decision_type, parallel_threads, seed):
+    if analysis_setting == "1ply" and parallel_threads == 1 and seed == 42:
+        return {
+            "candidate_generation": "all-legal-moves" if decision_type == "checker" else "not-applicable",
+            "cubeful": True,
+            "filter_max_moves": 5,
+            "filter_threshold": 0.08,
+            "include_game_plans": False,
+            "include_two_ply_cube_details": False,
+            "model": MODEL,
+            "parallel_threads": 1,
+            "prefilter_threshold": 0.0,
+            "seed": 42,
+        }
+    return {
+        "analysis_setting": analysis_setting,
+        "candidate_generation": "all-legal-moves" if decision_type == "checker" else "not-applicable",
+        "cubeful": True,
+        "include_game_plans": False,
+        "include_two_ply_cube_details": False,
+        "model": MODEL,
+        "parallel_threads": parallel_threads,
+        "seed": seed,
+    }
+
+
 def _analyze(payload, identity, bearoff):
     expected = payload.get("expected_identity")
     if not isinstance(expected, dict) or any(identity.get(key) != value for key, value in expected.items()):
@@ -185,19 +230,26 @@ def _analyze(payload, identity, bearoff):
     analysis = payload.get("analysis")
     if not isinstance(analysis, dict):
         raise ValueError("analysis configuration is required")
-    required_analysis = {
-        "analysis_setting": "1ply",
+    required_common = {
         "cubeful": True,
         "include_game_plans": False,
         "include_two_ply_cube_details": False,
-        "parallel_threads": 1,
-        "seed": 42,
     }
-    if any(analysis.get(key) != value for key, value in required_analysis.items()):
+    if any(analysis.get(key) != value for key, value in required_common.items()):
         raise ValueError("unsupported BGSage analysis configuration")
     decision_type = analysis.get("decision_type")
     if decision_type not in ("checker", "cube"):
         raise ValueError("unsupported BGSage decision type")
+    analysis_setting = analysis.get("analysis_setting")
+    supported = SUPPORTED_CHECKER_SETTINGS if decision_type == "checker" else SUPPORTED_CUBE_SETTINGS
+    if analysis_setting not in supported:
+        raise ValueError("unsupported BGSage {} setting".format(decision_type))
+    parallel_threads = analysis.get("parallel_threads")
+    if not isinstance(parallel_threads, int) or isinstance(parallel_threads, bool) or parallel_threads <= 0:
+        raise ValueError("parallel_threads must be a positive integer")
+    seed = analysis.get("seed")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ValueError("seed must be an integer")
     position_id = payload.get("position_id")
     match_id = payload.get("match_id")
     if not isinstance(position_id, str) or not isinstance(match_id, str):
@@ -210,7 +262,7 @@ def _analyze(payload, identity, bearoff):
     elif request_dice is not None or context["dice"] is not None:
         raise ValueError("cube analysis requires a pre-roll position without dice")
 
-    analyzer = _analyzer(bearoff)
+    analyzer = _analyzer(bearoff, analysis_setting, parallel_threads, seed)
     common = {
         "away1": context["player_away"],
         "away2": context["opponent_away"],
@@ -281,23 +333,17 @@ def _analyze(payload, identity, bearoff):
         }
     return {
         "analysis": body,
-        "configuration": {
-            "candidate_generation": "all-legal-moves" if decision_type == "checker" else "not-applicable",
-            "cubeful": True,
-            "filter_max_moves": 5,
-            "filter_threshold": 0.08,
-            "include_game_plans": False,
-            "include_two_ply_cube_details": False,
-            "model": MODEL,
-            "parallel_threads": 1,
-            "prefilter_threshold": 0.0,
-            "seed": 42,
-        },
+        "configuration": _analysis_configuration(
+            analysis_setting,
+            decision_type,
+            parallel_threads,
+            seed,
+        ),
         "identity": identity,
         "normalized_input": context,
         "protocol": PROTOCOL,
         "request_identity": {
-            "analysis_setting": "1ply",
+            "analysis_setting": analysis_setting,
             "decision_type": decision_type,
             "match_id": match_id,
             "position_id": position_id,

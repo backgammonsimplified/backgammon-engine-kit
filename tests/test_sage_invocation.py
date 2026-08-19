@@ -229,7 +229,7 @@ def test_sage_cache_key_is_deterministic_and_differs_from_gnu():
 
 def test_unsupported_setting_and_changed_configuration_fail_before_execution():
     adapter = SageAdapter(FakeRuntime(), process_runner=lambda *args, **kwargs: None)
-    unsupported = AnalysisService(adapters={"sage": adapter}).analyze(sage_request(setting="2ply"))
+    unsupported = AnalysisService(adapters={"sage": adapter}).analyze(sage_request(setting="rollout"))
     assert unsupported.result.failure.code == "unsupported_capability"
     valid = verified_sage_configuration()
     changed = valid.__class__(

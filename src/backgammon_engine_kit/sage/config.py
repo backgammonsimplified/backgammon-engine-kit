@@ -21,6 +21,12 @@ SAGE_NATIVE_SHA256 = "1b0449938243478916f2ab459b8525a7b9d8f73c3f74fbc5f43a34c1d7
 SAGE_PYTHON_SHA256 = "6d972cf21be56fe3c947ab6ba257ff8d08c342dd2714442986791bd9a6dfabfe"
 SAGE_GNUID_PARSER_SHA256 = "fadf04cc08033a297c683a3d8ccc9c53bcfae4743cffe6e0c8d6e3e5d014436c"
 
+# Decision-specific settings with retained execution evidence. The 20-match
+# Sage-vs-GNU trial used checker 4ply and cube 3ply. The original Engine Kit
+# evidence covers checker/cube 1ply.
+SAGE_SUPPORTED_CHECKER_SETTINGS = frozenset(("1ply", "4ply"))
+SAGE_SUPPORTED_CUBE_SETTINGS = frozenset(("1ply", "3ply"))
+
 
 def file_sha256(path):
     digest = hashlib.sha256()
@@ -43,6 +49,7 @@ def model_aggregate_sha256(models_dir):
 
 
 def verified_sage_configuration():
+    """Return the original v0.3.0 1ply configuration unchanged."""
     return EngineConfiguration(
         engine="sage",
         profile=SAGE_PROFILE,
@@ -69,6 +76,99 @@ def verified_sage_configuration():
             ("threads", 1),
         ),
     )
+
+
+def _validate_positive_int(value, label):
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError("{} must be a positive integer".format(label))
+
+
+def sage_configuration(
+    checker_setting="1ply",
+    cube_setting="1ply",
+    parallel_threads=1,
+    seed=42,
+):
+    """Build an evidence-gated Sage profile with independent checker/cube depth.
+
+    The legacy 1ply/1ply, one-thread, seed-42 configuration returns the exact
+    v0.3.0 configuration object so existing hashes and cache identities remain
+    stable. Other accepted combinations are represented explicitly in options.
+    """
+    if checker_setting not in SAGE_SUPPORTED_CHECKER_SETTINGS:
+        raise ValueError("unsupported evidenced Sage checker setting: {}".format(checker_setting))
+    if cube_setting not in SAGE_SUPPORTED_CUBE_SETTINGS:
+        raise ValueError("unsupported evidenced Sage cube setting: {}".format(cube_setting))
+    _validate_positive_int(parallel_threads, "parallel_threads")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ValueError("seed must be an integer")
+    if checker_setting == "1ply" and cube_setting == "1ply" and parallel_threads == 1 and seed == 42:
+        return verified_sage_configuration()
+    profile = "bgsage-{}-{}-checker-{}-cube-{}-cubeful".format(
+        SAGE_ENGINE_VERSION,
+        SAGE_MODEL_NAME,
+        checker_setting,
+        cube_setting,
+    )
+    return EngineConfiguration(
+        engine="sage",
+        profile=profile,
+        engine_version=SAGE_ENGINE_VERSION,
+        model_or_weights_identity=SAGE_MODEL_IDENTITY,
+        invocation_identity=SAGE_INVOCATION_IDENTITY,
+        parser_version=SAGE_PARSER_VERSION,
+        options=(
+            ("actual_evaluation_type", "neural-network-evaluation"),
+            ("bearoff_sha256", SAGE_BEAROFF_SHA256),
+            ("beaver", False),
+            ("candidate_generation", "all-legal-moves"),
+            ("checker_analysis_setting", checker_setting),
+            ("cube_analysis_setting", cube_setting),
+            ("cubeful", True),
+            ("deterministic", True),
+            ("include_game_plans", False),
+            ("jacoby", False),
+            ("model", SAGE_MODEL_NAME),
+            ("parallel_threads", parallel_threads),
+            ("protocol", SAGE_PROTOCOL_VERSION),
+            ("seed", seed),
+        ),
+    )
+
+
+def sage_configuration_settings(configuration):
+    """Validate a Sage configuration and return its executable settings."""
+    if configuration == verified_sage_configuration():
+        return {
+            "checker_setting": "1ply",
+            "cube_setting": "1ply",
+            "parallel_threads": 1,
+            "seed": 42,
+            "legacy": True,
+        }
+    options = dict(configuration.options)
+    try:
+        checker_setting = options["checker_analysis_setting"]
+        cube_setting = options["cube_analysis_setting"]
+        parallel_threads = options["parallel_threads"]
+        seed = options["seed"]
+    except KeyError as exc:
+        raise ValueError("Sage configuration lacks configurable profile settings") from exc
+    expected = sage_configuration(
+        checker_setting=checker_setting,
+        cube_setting=cube_setting,
+        parallel_threads=parallel_threads,
+        seed=seed,
+    )
+    if configuration != expected:
+        raise ValueError("Sage configuration identity differs from an evidenced profile")
+    return {
+        "checker_setting": checker_setting,
+        "cube_setting": cube_setting,
+        "parallel_threads": parallel_threads,
+        "seed": seed,
+        "legacy": False,
+    }
 
 
 @dataclass(frozen=True)

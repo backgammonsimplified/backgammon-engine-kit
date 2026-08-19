@@ -44,7 +44,34 @@ GNU cube:     1ply, 2ply
 
 Other numeric 1-4 ply combinations may be configured for a bounded commissioning run. They are not treated as previously verified merely because they can be represented.
 
-For every real request, the adapter verifies the engine-reported actual evaluation depth. A result fails closed if actual depth differs from the pinned request, or if runtime binary/model/resource identity differs from the pinned Engine Kit authority. Settings outside the currently supported numeric 1-4 ply surface remain rejected.
+## GNU checker depth and move filters
+
+GNU checker `plies` configure the target search depth. They do not guarantee that every legal move, or even the recommended move, will be evaluated to that target depth when move filters are enabled.
+
+The historical trial changed GNU checker/cube plies but did not override GNU's move filters. With the pinned GNU 1.08.003 executable this means the Normal move-filter profile:
+
+```text
+1 ply:  0-ply -> accept 0, extra 8 within 0.160
+2 ply:  0-ply -> accept 0, extra 8 within 0.160
+        1-ply -> no pruning
+3 ply:  0-ply -> accept 0, extra 8 within 0.160
+        1-ply -> no pruning
+        2-ply -> accept 0, extra 2 within 0.040
+4 ply:  0-ply -> accept 0, extra 8 within 0.160
+        1-ply -> no pruning
+        2-ply -> accept 0, extra 2 within 0.040
+        3-ply -> no pruning
+```
+
+Configurable GNU profiles encode this complete Normal filter as part of their public configuration identity and explicitly send all filter rows to the engine. The parser verifies the configured checker depth, cube depth, thread count, and Normal filter from GNU's own `show evaluation` output.
+
+For GNU checker results, `AnalysisResult.analysis_setting` is the configured checker target and each `CheckerCandidate.actual_ply` is the depth GNU actually used for that move after filtering. `CheckerDecision.actual_ply` is therefore the emitted depth of the recommended move and may be lower than the configured checker target. A candidate deeper than the configured target is rejected.
+
+GNU cube analysis does not use the checker move-filter mechanism, so cube `actual_ply` must equal the configured cube depth.
+
+For Sage checker/cube analysis, the top-level emitted evaluation depth must equal the requested setting. Sage may still retain lower-ply filtered checker candidates; those candidate depths are preserved rather than relabeled.
+
+Runtime binary/model/resource identity must also match the pinned Engine Kit authority. Settings outside the currently supported numeric 1-4 ply surface remain rejected.
 
 ## Ownership boundary with Benchmarker
 

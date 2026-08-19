@@ -1,0 +1,5 @@
+# Reproducible production runtime dependencies for Engine Kit 0.4.0.
+# The Engine Kit wheel itself is installed separately with --no-deps and is
+# identified by the release manifest SHA-256.
+ankigammon==1.7.0
+jsonschema==4.26.0

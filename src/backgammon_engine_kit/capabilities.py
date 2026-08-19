@@ -6,6 +6,10 @@ from .models import ANALYSIS_SETTINGS
 
 
 CAPABILITY_SCHEMA_VERSION = "engine-capabilities-v1"
+HISTORICAL_TRIAL_EVIDENCE = (
+    "backgammonsimplified/backgammon_bot@336d7eca593cdf08461c917cbc213b8c4cee4668 "
+    "referee.py and scripts/referee_mirrored_pair.py"
+)
 
 
 @dataclass(frozen=True)
@@ -92,13 +96,31 @@ def capability_report():
                     evidence="evidence/gnu/1.08.003/checker-1ply and cube-1ply",
                 )
             )
+        elif setting == "2ply":
+            gnu_settings.append(
+                SettingCapability(
+                    setting,
+                    checker=False,
+                    cube=True,
+                    evidence=HISTORICAL_TRIAL_EVIDENCE + " (GNU cube 2-ply)",
+                )
+            )
+        elif setting == "3ply":
+            gnu_settings.append(
+                SettingCapability(
+                    setting,
+                    checker=True,
+                    cube=False,
+                    evidence=HISTORICAL_TRIAL_EVIDENCE + " (GNU checker 3-ply)",
+                )
+            )
         else:
             gnu_settings.append(
                 SettingCapability(
                     setting,
                     checker=False,
                     cube=False,
-                    evidence="unavailable: no verified GNU transcript for this setting",
+                    evidence="unavailable: no retained GNU execution evidence for this decision/setting",
                 )
             )
     gnu = EngineCapability(
@@ -117,13 +139,31 @@ def capability_report():
                     evidence="evidence/sage/1.2.20260706/checker-1ply and cube-1ply",
                 )
             )
+        elif setting == "3ply":
+            sage_settings.append(
+                SettingCapability(
+                    setting,
+                    checker=False,
+                    cube=True,
+                    evidence=HISTORICAL_TRIAL_EVIDENCE + " (Sage cube 3-ply)",
+                )
+            )
+        elif setting == "4ply":
+            sage_settings.append(
+                SettingCapability(
+                    setting,
+                    checker=True,
+                    cube=False,
+                    evidence=HISTORICAL_TRIAL_EVIDENCE + " (Sage checker 4-ply)",
+                )
+            )
         else:
             sage_settings.append(
                 SettingCapability(
                     setting,
                     checker=False,
                     cube=False,
-                    evidence="unavailable: no verified Sage artifact for this setting",
+                    evidence="unavailable: no retained Sage execution evidence for this decision/setting",
                 )
             )
     sage = EngineCapability(

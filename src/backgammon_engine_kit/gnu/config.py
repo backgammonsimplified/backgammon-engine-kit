@@ -26,11 +26,11 @@ GNU_MODEL_IDENTITY = ";".join(
     "{}:sha256:{}".format(name, digest) for name, digest in RESOURCE_IDENTITIES
 )
 
-# Decision-specific settings with retained execution evidence. The 20-match
-# Sage-vs-GNU trial used checker 3-ply and cube 2-ply. The original Engine Kit
-# evidence covers checker/cube 1-ply.
-GNU_SUPPORTED_CHECKER_PLIES = frozenset((1, 3))
-GNU_SUPPORTED_CUBE_PLIES = frozenset((1, 2))
+# Engine Kit can represent and runtime-verify GNU numeric evaluation depths
+# without a source change for every benchmark. Retained evidence is narrower
+# and is reported separately by capability_report().
+GNU_SUPPORTED_CHECKER_PLIES = frozenset((1, 2, 3, 4))
+GNU_SUPPORTED_CUBE_PLIES = frozenset((1, 2, 3, 4))
 
 
 def file_sha256(path):
@@ -78,11 +78,17 @@ def _validate_positive_int(value, label):
 
 
 def gnu_configuration(checker_plies=1, cube_plies=1, threads=1):
-    """Build an evidence-gated GNU profile with independent checker/cube depth."""
+    """Build a pinned GNU profile with independent checker/cube depth.
+
+    Numeric 1-4 ply settings can be represented for commissioning without an
+    Engine Kit source change. Every real result is still fail-closed against
+    GNU's reported effective evaluation depth. capability_report() distinguishes
+    retained evidence from settings that still require a runtime smoke.
+    """
     if checker_plies not in GNU_SUPPORTED_CHECKER_PLIES:
-        raise ValueError("unsupported evidenced GNU checker plies: {}".format(checker_plies))
+        raise ValueError("unsupported GNU checker plies: {}".format(checker_plies))
     if cube_plies not in GNU_SUPPORTED_CUBE_PLIES:
-        raise ValueError("unsupported evidenced GNU cube plies: {}".format(cube_plies))
+        raise ValueError("unsupported GNU cube plies: {}".format(cube_plies))
     _validate_positive_int(threads, "threads")
     if checker_plies == 1 and cube_plies == 1 and threads == 1:
         return verified_gnu_configuration()
@@ -134,7 +140,7 @@ def gnu_configuration_settings(configuration):
         threads=threads,
     )
     if configuration != expected:
-        raise ValueError("GNU configuration identity differs from an evidenced profile")
+        raise ValueError("GNU configuration identity differs from the pinned profile")
     return {
         "checker_plies": checker_plies,
         "cube_plies": cube_plies,

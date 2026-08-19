@@ -9,6 +9,7 @@ from .config import (
     SAGE_MODEL_IDENTITY,
     SAGE_MODEL_NAME,
     SAGE_PROTOCOL_VERSION,
+    sage_configuration_settings,
 )
 
 
@@ -33,6 +34,7 @@ def identity_invocation(runtime):
 def build_invocation(request, runtime):
     if request.position.format != "gnuid" or request.position.id is None:
         raise ValueError("Sage adapter requires a verified combined GNU ID")
+    settings = sage_configuration_settings(request.configuration)
     position_id, match_id = request.position.id.split(":", 1)
     payload = {
         "analysis": {
@@ -41,8 +43,8 @@ def build_invocation(request, runtime):
             "decision_type": request.decision_type,
             "include_game_plans": False,
             "include_two_ply_cube_details": False,
-            "parallel_threads": 1,
-            "seed": 42,
+            "parallel_threads": settings["parallel_threads"],
+            "seed": settings["seed"],
         },
         "dice": list(request.dice) if request.dice is not None else None,
         "expected_identity": {

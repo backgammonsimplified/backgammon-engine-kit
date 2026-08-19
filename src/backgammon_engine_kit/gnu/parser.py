@@ -66,13 +66,14 @@ def _require_identity(request, output):
         raise MalformedRawResponse("GNU cube output unexpectedly contains checker dice")
 
 
-def _evaluation_is_verified(output, expected_ply, threads):
+def _evaluation_is_verified(output, checker_plies, cube_plies, threads):
     rejected = ("Unknown keyword", "You must set", "Error:")
     if any(marker in output for marker in rejected):
         return False
     thread_marker = "{} calculation thread{}.".format(threads, "" if threads == 1 else "s")
     required = (
-        "will use {} ply evaluation.".format(expected_ply),
+        "`eval' and `hint' chequerplay will use {} ply evaluation.".format(checker_plies),
+        "`eval' and `hint' cube decisions will use {} ply evaluation.".format(cube_plies),
         "will use cubeful evaluation.",
         "will use deterministic noise.",
         "will use noiseless evaluations.",
@@ -95,7 +96,12 @@ class GnuTextParser(EngineOutputParser):
         _require_identity(request, output)
         settings = gnu_configuration_settings(request.configuration)
         expected_ply = _expected_ply(request)
-        if not _evaluation_is_verified(output, expected_ply, settings["threads"]):
+        if not _evaluation_is_verified(
+            output,
+            settings["checker_plies"],
+            settings["cube_plies"],
+            settings["threads"],
+        ):
             raise MalformedRawResponse("GNU output does not verify the pinned evaluation profile")
         if request.decision_type == "checker":
             decision, warnings = self._parse_checker(output, expected_ply)

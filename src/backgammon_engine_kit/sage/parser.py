@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 
 from ..adapters import EngineOutputParser, MalformedRawResponse
 from ..models import (
@@ -21,6 +22,7 @@ from .config import (
     SAGE_MODEL_NAME,
     SAGE_NATIVE_SHA256,
     SAGE_PROTOCOL_VERSION,
+    sage_configuration_settings,
 )
 
 
@@ -59,9 +61,19 @@ def _probabilities(value):
 
 
 def _ply(value):
-    if value != "1-ply":
-        raise MalformedRawResponse("BGSage output does not expose the verified 1-ply evaluation")
-    return 1
+    if not isinstance(value, str):
+        raise MalformedRawResponse("BGSage evaluation depth is malformed")
+    match = re.fullmatch(r"([1-4])-?ply", value.strip().lower())
+    if match is None:
+        raise MalformedRawResponse("BGSage output exposes an unsupported evaluation depth")
+    return int(match.group(1))
+
+
+def _expected_ply(request):
+    try:
+        return int(request.analysis_setting[:-3])
+    except (TypeError, ValueError):
+        raise MalformedRawResponse("BGSage request has an unsupported evaluation depth")
 
 
 def _validate_identity(output):
@@ -118,26 +130,39 @@ def _validate_request(request, output):
         raise MalformedRawResponse("BGSage cube-owner perspective is unrecognized")
 
 
-def _validate_configuration(output, decision_type):
+def _validate_configuration(output, request):
     configuration = _object(output.get("configuration"), "configuration")
-    expected = {
-        "candidate_generation": "all-legal-moves" if decision_type == "checker" else "not-applicable",
-        "cubeful": True,
-        "filter_max_moves": 5,
-        "filter_threshold": 0.08,
-        "include_game_plans": False,
-        "include_two_ply_cube_details": False,
-        "model": "stage9",
-        "parallel_threads": 1,
-        "prefilter_threshold": 0.0,
-        "seed": 42,
-    }
+    settings = sage_configuration_settings(request.configuration)
+    if settings["legacy"] and request.analysis_setting == "1ply":
+        expected = {
+            "candidate_generation": "all-legal-moves" if request.decision_type == "checker" else "not-applicable",
+            "cubeful": True,
+            "filter_max_moves": 5,
+            "filter_threshold": 0.08,
+            "include_game_plans": False,
+            "include_two_ply_cube_details": False,
+            "model": "stage9",
+            "parallel_threads": 1,
+            "prefilter_threshold": 0.0,
+            "seed": 42,
+        }
+    else:
+        expected = {
+            "analysis_setting": request.analysis_setting,
+            "candidate_generation": "all-legal-moves" if request.decision_type == "checker" else "not-applicable",
+            "cubeful": True,
+            "include_game_plans": False,
+            "include_two_ply_cube_details": False,
+            "model": "stage9",
+            "parallel_threads": settings["parallel_threads"],
+            "seed": settings["seed"],
+        }
     if configuration != expected:
-        raise MalformedRawResponse("BGSage output configuration differs from verified evidence")
+        raise MalformedRawResponse("BGSage output configuration differs from the pinned profile")
 
 
 class SageJsonParser(EngineOutputParser):
-    """Parse only the checker and cube JSON layouts retained as evidence."""
+    """Parse checker and cube JSON layouts and verify actual evaluation depth."""
 
     def parse(self, request, raw_source, started_at=None, completed_at=None):
         if raw_source.inline is None:
@@ -164,16 +189,17 @@ class SageJsonParser(EngineOutputParser):
             raise MalformedRawResponse("BGSage protocol did not return a complete result")
         _validate_identity(output)
         _validate_request(request, output)
-        _validate_configuration(output, request.decision_type)
+        _validate_configuration(output, request)
         analysis = _object(output["analysis"], "analysis")
         if analysis.get("type") != request.decision_type:
             raise MalformedRawResponse("BGSage decision type changed during analysis")
+        expected_ply = _expected_ply(request)
         if request.decision_type == "checker":
-            checker, warnings = self._parse_checker(analysis)
+            checker, warnings = self._parse_checker(analysis, expected_ply)
             cube = None
         else:
             checker = None
-            cube, warnings = self._parse_cube(analysis)
+            cube, warnings = self._parse_cube(analysis, expected_ply)
         return AnalysisResult(
             position=request.position,
             engine=request.engine,
@@ -190,13 +216,15 @@ class SageJsonParser(EngineOutputParser):
             completed_at=completed_at,
         )
 
-    def _parse_checker(self, analysis):
+    def _parse_checker(self, analysis, expected_ply):
         _exact_keys(
             analysis,
             ("board", "candidate_count", "candidates", "dice", "eval_level", "type"),
             "checker analysis",
         )
         actual_ply = _ply(analysis["eval_level"])
+        if actual_ply != expected_ply:
+            raise MalformedRawResponse("BGSage checker actual depth differs from the requested profile")
         candidates_raw = analysis["candidates"]
         if not isinstance(candidates_raw, list) or not candidates_raw:
             raise MalformedRawResponse("BGSage checker output contains no candidates")
@@ -232,6 +260,8 @@ class SageJsonParser(EngineOutputParser):
             if item["notation_source"] != "bgsage.possible_single_die_moves-v1":
                 raise MalformedRawResponse("BGSage checker notation source is unrecognized")
             candidate_ply = _ply(item["eval_level"])
+            if candidate_ply != expected_ply:
+                raise MalformedRawResponse("BGSage checker candidate depth differs from the requested profile")
             candidates.append(
                 CheckerCandidate(
                     move_id="sage-move-{}-{}".format(expected_rank, stable_hash(board)[:12]),
@@ -267,7 +297,7 @@ class SageJsonParser(EngineOutputParser):
             ),
         )
 
-    def _parse_cube(self, analysis):
+    def _parse_cube(self, analysis, expected_ply):
         _exact_keys(
             analysis,
             (
@@ -286,7 +316,9 @@ class SageJsonParser(EngineOutputParser):
             "cube analysis",
         )
         actual_ply = _ply(analysis["eval_level"])
-        if analysis["details"] is not None:
+        if actual_ply != expected_ply:
+            raise MalformedRawResponse("BGSage cube actual depth differs from the requested profile")
+        if expected_ply == 1 and analysis["details"] is not None:
             raise MalformedRawResponse("BGSage 1-ply cube output unexpectedly contains deeper details")
         actions_raw = analysis["actions"]
         if not isinstance(actions_raw, list) or len(actions_raw) != 3:

@@ -5,6 +5,7 @@ import argparse
 import json
 
 from backgammon_engine_kit.gnu import GnuAdapter, GnuRuntimeConfiguration, gnu_configuration
+from backgammon_engine_kit.gnu.config import gnu_configuration_settings
 from backgammon_engine_kit.models import AnalysisRequest, Position
 from backgammon_engine_kit.sage import SageAdapter, SageRuntimeConfiguration, sage_configuration
 
@@ -29,7 +30,7 @@ def request(engine, decision_type, setting, configuration):
 
 def result_record(engine, decision_type, result, configuration):
     decision = result.checker_decision if decision_type == "checker" else result.cube_decision
-    return {
+    record = {
         "engine": engine,
         "decision_type": decision_type,
         "requested_setting": result.analysis_setting,
@@ -38,6 +39,16 @@ def result_record(engine, decision_type, result, configuration):
         "profile": configuration.profile,
         "status": result.status,
     }
+    if engine == "gnu":
+        settings = gnu_configuration_settings(configuration)
+        record.update(
+            {
+                "configured_checker_plies": settings["checker_plies"],
+                "configured_cube_plies": settings["cube_plies"],
+                "checker_move_filter_profile": settings["move_filter_profile"],
+            }
+        )
+    return record
 
 
 def main():
@@ -95,21 +106,33 @@ def main():
             )
         )
 
-    expected = {
-        ("sage", "checker"): 4,
-        ("sage", "cube"): 3,
-        ("gnu", "checker"): 3,
-        ("gnu", "cube"): 2,
-    }
     for record in records:
-        if record["actual_ply"] != expected[(record["engine"], record["decision_type"])]:
-            raise SystemExit(
-                "actual ply mismatch for {}/{}: {}".format(
-                    record["engine"],
-                    record["decision_type"],
-                    record["actual_ply"],
-                )
-            )
+        key = (record["engine"], record["decision_type"])
+        if key == ("sage", "checker"):
+            if record["requested_setting"] != "4ply" or record["actual_ply"] != 4:
+                raise SystemExit("Sage checker profile did not execute at 4-ply")
+        elif key == ("sage", "cube"):
+            if record["requested_setting"] != "3ply" or record["actual_ply"] != 3:
+                raise SystemExit("Sage cube profile did not execute at 3-ply")
+        elif key == ("gnu", "checker"):
+            if record["requested_setting"] != "3ply" or record["configured_checker_plies"] != 3:
+                raise SystemExit("GNU checker was not configured for 3-ply")
+            if record["configured_cube_plies"] != 2:
+                raise SystemExit("GNU checker run did not preserve the pinned 2-ply cube configuration")
+            if not isinstance(record["actual_ply"], int) or not 0 <= record["actual_ply"] <= 3:
+                raise SystemExit("GNU checker recommendation reports an impossible actual ply")
+            if "normal-v1" not in record["checker_move_filter_profile"]:
+                raise SystemExit("GNU checker did not use the pinned Normal move-filter profile")
+        elif key == ("gnu", "cube"):
+            if record["requested_setting"] != "2ply" or record["configured_cube_plies"] != 2:
+                raise SystemExit("GNU cube was not configured for 2-ply")
+            if record["configured_checker_plies"] != 3:
+                raise SystemExit("GNU cube run did not preserve the pinned 3-ply checker configuration")
+            if record["actual_ply"] != 2:
+                raise SystemExit("GNU cube result did not execute at 2-ply")
+        else:
+            raise SystemExit("unexpected smoke result {}".format(key))
+
     print(json.dumps({"profile": "sage4/3-gnu3/2", "results": records}, indent=2, sort_keys=True))
     print("HISTORICAL_TRIAL_PROFILE_SMOKE=PASS")
 

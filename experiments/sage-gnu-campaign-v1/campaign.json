@@ -1,0 +1,154 @@
+{
+  "artifact_policy": {
+    "default_root": null,
+    "immutable_pair_directory": "pairs/{pair_id}",
+    "pair_commit_marker": "_COMMITTED.json",
+    "separate_from_runtime": true
+  },
+  "benchmarker": {
+    "branch": "benchmark/sage4-gnu3-public-v1",
+    "repository": "backgammonsimplified/backgammon-engine-kit"
+  },
+  "bounds": {
+    "max_decisions_per_match": 10000,
+    "pair_count": 10,
+    "stop_policy": "finish-and-commit-active-pair-then-stop",
+    "stop_requested_file": "STOP_AFTER_PAIR"
+  },
+  "campaign_id": "sage4-gnu3-7pt-mirrored-v1",
+  "dice": {
+    "files_per_match": 25,
+    "namespace_seed_format": "{base_seed}:match:{side}",
+    "protocol": "physical-seat-dice-stream-v1",
+    "roll_count_per_game_seat": 50000,
+    "stream_key_format": "{namespace_seed}:match:1:length:7:game:{game_number}:seat:{physical_seat}:roll:{roll_index}",
+    "stream_protocol_rules": {
+      "checker_roll": "advance-only-the-prompted-physical-seat-stream",
+      "divergence": "A-and-B-consume-their-namespaces-independently-after-gameplay-diverges",
+      "opening_roll": "consume-opening_die-at-the-same-attempt-index-from-O-and-X-until-non-tie",
+      "ownership": "physical-seat-not-engine"
+    }
+  },
+  "engine_kit": {
+    "base_commit": "ab42f8186c5b04ca965a268bdc203179a7a669d8",
+    "branch": "release/v0.4.0",
+    "production_dependency_lock": {
+      "path": "experiments/sage-gnu-campaign-v1/engine-kit-v0.4.0-requirements.lock",
+      "sha256": "22c3a3053dae801e9bd57a1d361a8e53ab08bdd1252d5e33cd2c6f58572070e7"
+    },
+    "release": {
+      "sdist_filename": "backgammon_engine_kit-0.4.0.tar.gz",
+      "sdist_sha256": "f60a7f1cba2aa7b42c07e9653ec6486ebcb0557d49d2b3c652803e2ca13ffa54",
+      "tag": "v0.4.0",
+      "wheel_filename": "backgammon_engine_kit-0.4.0-py3-none-any.whl",
+      "wheel_sha256": "db65fbf847da621c644e126144b9c2499e3bae842382bc3d4399446894011158"
+    },
+    "repository": "backgammonsimplified/backgammon-engine-kit",
+    "source_commit": "f13446140ea06f9dc1ef51d4b6b0c83c5a46237d"
+  },
+  "engines": {
+    "gnu": {
+      "checker_configured_target": "3ply",
+      "checker_move_filter_identity": "normal-v1;1:0=0,8,0.160;2:0=0,8,0.160|1=skip;3:0=0,8,0.160|1=skip|2=0,2,0.040;4:0=0,8,0.160|1=skip|2=0,2,0.040|3=skip",
+      "configuration_hash": "36c2c849e4096eaa1505cee80f9c68c1a2859748f0266b0e8876d977108f4e17",
+      "cube_configured_target": "2ply",
+      "runtime_identity": {
+        "engine_version": "1.08.003 20260710",
+        "executable_sha256": "caaa300e2ed0f1e4315979e87e15d884ad60f094f69dfc92b170dfaf1c9f8937",
+        "resources": {
+          "gnubg.wd": "bb045bb416c70706ba34ad64595af2b43cac3722560b6ab01829eb719417153b",
+          "gnubg_os0.bd": "38089567e87a681682bb4ff53f30d781af215fc04debbdff3f61b6db68547a49",
+          "gnubg_ts0.bd": "9eac8a2c697dae8a09f2e5653022084b9e725df6c32950cb5299b273fc64500f",
+          "met/Kazaross-XG2.xml": "7a232b171744b8db34306d11cff79a5974541328bb033b6bf16c012e8f7a3cc3"
+        }
+      },
+      "threads": 1
+    },
+    "sage": {
+      "checker_configured_target": "4ply",
+      "configuration_hash": "2435c105be505b868c5a804e703aec4d572cf88886e48988333e39763be6c29e",
+      "cube_configured_target": "3ply",
+      "runtime_identity": {
+        "bearoff_sha256": "907bbe0042dadfa14840a9f470b6b5adac213d5b2c17dc0e41aec27b087e3fe6",
+        "engine_version": "1.2.20260706",
+        "gnuid_parser_sha256": "fadf04cc08033a297c683a3d8ccc9c53bcfae4743cffe6e0c8d6e3e5d014436c",
+        "model_identity": "stage9",
+        "model_sha256": "61dee35eb2a6ee974eefb6d8a0fa1c7270d0042e038cf11fcaac78b62f6a26e3",
+        "native_module_sha256": "1b0449938243478916f2ab459b8525a7b9d8f73c3f74fbc5f43a34c1d7b54c12",
+        "python_sha256": "6d972cf21be56fe3c947ab6ba257ff8d08c342dd2714442986791bd9a6dfabfe"
+      },
+      "seed": 42,
+      "threads": 1
+    }
+  },
+  "identity": {
+    "base_seed_algorithm": "sha256-domain-separated-utf8-v1",
+    "base_seed_domain": "sage-gnu-campaign-base-seed-v1",
+    "pair_id_algorithm": "sha256-canonical-json-prefix-v1",
+    "pair_id_domain": "sage-gnu-campaign-pair-id-v1",
+    "pair_sequence_origin": 1
+  },
+  "manifest_policy": {
+    "candidate_actual_depth_evidence": "matches/{side}/decisions.jsonl",
+    "checksum_algorithm": "sha256",
+    "private_credentials": "forbidden",
+    "schema": "sage-gnu-campaign-manifest-v1"
+  },
+  "match": {
+    "length_points": 7,
+    "members": {
+      "A": {
+        "gnu_physical_seat": "X",
+        "sage_physical_seat": "O"
+      },
+      "B": {
+        "gnu_physical_seat": "O",
+        "sage_physical_seat": "X"
+      }
+    }
+  },
+  "provenance": {
+    "historical_authority": {
+      "commit": "336d7eca593cdf08461c917cbc213b8c4cee4668",
+      "files": [
+        "referee.py",
+        "scripts/referee_mirrored_pair.py",
+        "scripts/seat_dice_streams.py"
+      ],
+      "repository": "backgammonsimplified/backgammon_bot"
+    },
+    "required_launch_evidence": [
+      "benchmarker-git-identity",
+      "campaign-config-content-hash",
+      "engine-kit-git-and-release-identity",
+      "runner-environment-python-package-freeze-identity",
+      "engine-runtime-content-identities",
+      "host-and-runtime-identity",
+      "sanitized-launch-command",
+      "state-transition-timestamps",
+      "output-sha256"
+    ]
+  },
+  "resume_policy": {
+    "committed_pair": "verify-and-skip-never-regenerate",
+    "failed_pair": "new-attempt-same-pair-identity-and-base-seed",
+    "incomplete_pair": "preserve-attempt-and-restart-entire-pair-with-same-identity-and-base-seed"
+  },
+  "runtime_policy": {
+    "default_root": null,
+    "environment_freeze": "requirements.freeze.txt",
+    "environment_manifest": "environment_manifest.json",
+    "forbidden_path_components": [
+      "canonical",
+      "canonical_ingestion",
+      "canonical-listener",
+      "canonical-output",
+      "retcorpus-main"
+    ],
+    "pair_workspace": "{campaign_id}/runner-workspace/{pair_id}/attempt-{attempt}",
+    "runner_environment": "{campaign_id}/runner-workspace/.venv",
+    "runner_workspace": "{campaign_id}/runner-workspace",
+    "workspace_is_configuration_authority": false
+  },
+  "schema_version": "sage-gnu-campaign-config-v1"
+}

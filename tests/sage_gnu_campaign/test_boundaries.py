@@ -17,13 +17,11 @@ def test_runtime_and_artifact_defaults_are_unset_and_cross_campaign_roots_are_de
     config = load_campaign_config(CONFIG)
     assert config.data["runtime_policy"]["default_root"] is None
     assert config.data["artifact_policy"]["default_root"] is None
-    kit = tmp_path / "engine-kit"
     repository = tmp_path / "benchmarker"
     with pytest.raises(PreflightError, match="forbidden cross-campaign"):
         validate_roots(
             config,
             repository,
-            kit,
             tmp_path / "canonical-output" / "runtime",
             tmp_path / "campaign-artifacts",
         )
@@ -31,7 +29,6 @@ def test_runtime_and_artifact_defaults_are_unset_and_cross_campaign_roots_are_de
         validate_roots(
             config,
             repository,
-            kit,
             tmp_path / "canonical" / "runtime",
             tmp_path / "campaign-artifacts",
         )
@@ -57,5 +54,6 @@ def test_cli_exposes_no_experiment_setting_overrides() -> None:
         "--gnu-cube",
         "--dice-seed",
         "--move-filter",
+        "--engine-kit-root",
     ):
         assert forbidden not in help_text

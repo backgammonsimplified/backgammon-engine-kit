@@ -225,7 +225,6 @@ def _initialize_campaign_manifest(
 def run_campaign(
     config: CampaignConfig,
     repository: Path,
-    engine_kit_root: Path,
     runtime_root: Path,
     artifact_root: Path,
     launch_argv: list[str],
@@ -236,7 +235,6 @@ def run_campaign(
     report = preflight(
         config,
         repository,
-        engine_kit_root,
         runtime_root,
         artifact_root,
         require_clean_benchmarker=True,
@@ -253,7 +251,7 @@ def run_campaign(
     )
     launch = sanitized_launch_command(
         launch_argv,
-        (str(repository), str(engine_kit_root), str(runtime_root), str(artifact_root)),
+        (str(repository), str(runtime_root), str(artifact_root)),
     )
     common.update(
         {
@@ -296,7 +294,7 @@ def run_campaign(
             "output_file_sha256": {},
         }
         write_json(run_manifest_path, run_manifest)
-        session = EngineKitSession(config, engine_kit_root)
+        session = EngineKitSession(config)
         executor = executor_factory(config, session)
         new_pairs = 0
         stop_reason = "campaign-bound-reached"

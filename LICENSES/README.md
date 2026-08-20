@@ -1,11 +1,8 @@
-# Full Licence Texts Required
+# License texts
 
-Before public release, add official unmodified copies:
+This public campaign branch includes the complete legal texts used by its committed source tree:
 
-```text
-AGPL-3.0-only.txt
-CC-BY-SA-4.0.txt
-CC-BY-4.0.txt
-```
+- `AGPL-3.0-only.txt` for software.
+- `CC-BY-SA-4.0.txt` for original explanatory and methodology material.
 
-`../LICENSE.md` explains which repository materials use each licence.
+Benchmark result artifacts are not committed by this branch-finalization task. Any later public result release must state its own data/output licensing explicitly.

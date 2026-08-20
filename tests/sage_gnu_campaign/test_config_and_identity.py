@@ -53,8 +53,9 @@ def test_changed_profile_is_rejected(tmp_path: Path) -> None:
 def test_engine_kit_source_and_release_identity_fields_are_pinned() -> None:
     kit = load_campaign_config(CONFIG).data["engine_kit"]
     assert kit["repository"] == "backgammonsimplified/backgammon-engine-kit"
-    assert kit["source_commit"] == "f13446140ea06f9dc1ef51d4b6b0c83c5a46237d"
+    assert kit["source_commit"] == "f87c69b10efa707f52aa1e42c74808d9b3bc109f"
     assert kit["base_commit"] == "ab42f8186c5b04ca965a268bdc203179a7a669d8"
+    assert kit["release_commit"] == "f13446140ea06f9dc1ef51d4b6b0c83c5a46237d"
     assert kit["release"]["tag"] == "v0.4.0"
     assert len(kit["release"]["wheel_sha256"]) == 64
     assert len(kit["release"]["sdist_sha256"]) == 64
@@ -65,8 +66,8 @@ def test_pair_id_and_base_seed_are_stable_and_bounded() -> None:
     config = load_campaign_config(CONFIG)
     first = pair_identity(config, 1)
     assert first == pair_identity(config, 1)
-    assert first.pair_id == "pair-000001-586101693d87c4f0"
-    assert first.base_seed == "sha256:0fed2a4617171311f371c6a831f6706ed2e835b8a452fa1ecc4fbebde96399bc"
+    assert first.pair_id == "pair-000001-191bd73684228b92"
+    assert first.base_seed == "sha256:4ecb9ad6b75ca0e48096bad7538fd8fb6a038ebdd9ad3cc8fe27619cfec89741"
     assert len(all_pair_identities(config)) == 10
     assert pair_identity(config, 2) != first
     with pytest.raises(ValueError):

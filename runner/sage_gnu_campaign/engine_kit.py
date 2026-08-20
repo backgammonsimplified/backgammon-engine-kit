@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import sys
 from pathlib import Path
 from typing import Any
@@ -32,14 +33,10 @@ def validate_actual_depth_evidence(
 
 
 class EngineKitSession:
-    """Delegate every engine-facing decision operation to Engine Kit."""
+    """Delegate every engine-facing decision operation to the isolated Engine Kit release."""
 
-    def __init__(self, config: CampaignConfig, engine_kit_root: Path):
+    def __init__(self, config: CampaignConfig):
         self.config = config
-        self.root = Path(engine_kit_root).resolve()
-        source = self.root / "src"
-        if not source.is_dir():
-            raise EngineKitMismatch("Engine Kit source package directory is unavailable")
         models = importlib.import_module("backgammon_engine_kit.models")
         sage_module = importlib.import_module("backgammon_engine_kit.sage")
         gnu_module = importlib.import_module("backgammon_engine_kit.gnu")
@@ -47,8 +44,11 @@ class EngineKitSession:
         position_contract = importlib.import_module("backgammon_engine_kit.position_contract")
         imported = Path(importlib.import_module("backgammon_engine_kit").__file__).resolve()
         environment = Path(sys.prefix).resolve()
-        if not imported.is_relative_to(environment) or imported.is_relative_to(source):
+        if not imported.is_relative_to(environment):
             raise EngineKitMismatch("imported Engine Kit is not isolated in the runner environment")
+        expected_version = config.data["engine_kit"]["release"]["tag"].removeprefix("v")
+        if importlib.metadata.version("backgammon-engine-kit") != expected_version:
+            raise EngineKitMismatch("installed Engine Kit release version differs from campaign authority")
 
         self.AnalysisRequest = models.AnalysisRequest
         self.Position = models.Position

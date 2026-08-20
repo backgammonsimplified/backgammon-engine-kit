@@ -56,11 +56,7 @@ class CampaignConfig:
             "match": self.data["match"],
             "dice": self.data["dice"],
             "engines": {
-                name: {
-                    key: value
-                    for key, value in engine.items()
-                    if key != "runtime_identity"
-                }
+                name: {key: value for key, value in engine.items() if key != "runtime_identity"}
                 for name, engine in self.data["engines"].items()
             },
             "engine_kit_source": {
@@ -100,10 +96,13 @@ def _validate(data: dict[str, Any]) -> None:
     _require(gnu.get("threads") == 1, "GNU commissioning threads must remain one")
     kit = data.get("engine_kit", {})
     _require(
-        kit.get("source_commit") == "f13446140ea06f9dc1ef51d4b6b0c83c5a46237d",
-        "Engine Kit source commit changed",
+        kit.get("source_commit") == "f87c69b10efa707f52aa1e42c74808d9b3bc109f",
+        "Engine Kit package source commit changed",
     )
-
+    _require(
+        kit.get("release_commit") == "f13446140ea06f9dc1ef51d4b6b0c83c5a46237d",
+        "Engine Kit release commit changed",
+    )
     _require(kit.get("branch") == "release/v0.4.0", "Engine Kit release branch changed")
     _require(kit.get("release", {}).get("tag") == "v0.4.0", "Engine Kit release tag changed")
     _require(bool(kit.get("release", {}).get("wheel_sha256")), "Engine Kit wheel identity missing")
@@ -127,8 +126,7 @@ def _validate(data: dict[str, Any]) -> None:
     _require(
         runtime_policy.get("runner_workspace") == "{campaign_id}/runner-workspace"
         and runtime_policy.get("runner_environment") == "{campaign_id}/runner-workspace/.venv"
-        and runtime_policy.get("pair_workspace")
-        == "{campaign_id}/runner-workspace/{pair_id}/attempt-{attempt}",
+        and runtime_policy.get("pair_workspace") == "{campaign_id}/runner-workspace/{pair_id}/attempt-{attempt}",
         "campaign-owned runner workspace layout changed",
     )
 

@@ -1,10 +1,23 @@
 {
+  "package_source_commit": "f87c69b10efa707f52aa1e42c74808d9b3bc109f",
+  "production_dependency_lock": {
+    "filename": "requirements-production.lock",
+    "sha256": "22c3a3053dae801e9bd57a1d361a8e53ab08bdd1252d5e33cd2c6f58572070e7",
+    "target_runtime": "CPython 3.11 / Linux x86_64 campaign runner"
+  },
   "schema_version": "backgammon-engine-kit-release-manifest-v1",
-  "version": "0.4.0",
+  "sdist": {
+    "filename": "backgammon_engine_kit-0.4.0.tar.gz",
+    "payload_sha256": "cabc41d810361e613f34bff0e4661f7bfef05a706c0509e0fbc0326e3596d74f",
+    "reproducibility": "tar-payload-content-and-mode-v1;archive-metadata-excluded",
+    "sha256": "f60a7f1cba2aa7b42c07e9653ec6486ebcb0557d49d2b3c652803e2ca13ffa54"
+  },
   "tag": "v0.4.0",
   "validated_configurable_profile_source_base": "833929ea72ccec058527f3cd1fa0b54a07ac666b",
-  "package_source_commit": "f87c69b10efa707f52aa1e42c74808d9b3bc109f",
-  "wheel": {"filename": "backgammon_engine_kit-0.4.0-py3-none-any.whl", "sha256": "db65fbf847da621c644e126144b9c2499e3bae842382bc3d4399446894011158"},
-  "sdist": {"filename": "backgammon_engine_kit-0.4.0.tar.gz", "sha256": "f60a7f1cba2aa7b42c07e9653ec6486ebcb0557d49d2b3c652803e2ca13ffa54"},
-  "production_dependency_lock": {"filename": "requirements-production.lock", "sha256": "22c3a3053dae801e9bd57a1d361a8e53ab08bdd1252d5e33cd2c6f58572070e7", "target_runtime": "CPython 3.11 / Linux x86_64 campaign runner"}
+  "version": "0.4.0",
+  "wheel": {
+    "filename": "backgammon_engine_kit-0.4.0-py3-none-any.whl",
+    "reproducibility": "byte-identical-build-v1",
+    "sha256": "db65fbf847da621c644e126144b9c2499e3bae842382bc3d4399446894011158"
+  }
 }

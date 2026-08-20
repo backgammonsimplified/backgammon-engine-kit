@@ -43,8 +43,9 @@
       "wheel_filename": "backgammon_engine_kit-0.4.0-py3-none-any.whl",
       "wheel_sha256": "db65fbf847da621c644e126144b9c2499e3bae842382bc3d4399446894011158"
     },
+    "release_commit": "f13446140ea06f9dc1ef51d4b6b0c83c5a46237d",
     "repository": "backgammonsimplified/backgammon-engine-kit",
-    "source_commit": "f13446140ea06f9dc1ef51d4b6b0c83c5a46237d"
+    "source_commit": "f87c69b10efa707f52aa1e42c74808d9b3bc109f"
   },
   "engines": {
     "gnu": {

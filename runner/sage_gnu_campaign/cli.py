@@ -25,7 +25,6 @@ def parser() -> argparse.ArgumentParser:
     status.add_argument("--artifact-root", type=Path, required=True)
     for name in ("bootstrap", "preflight", "run"):
         command = commands.add_parser(name)
-        command.add_argument("--engine-kit-root", type=Path, required=True)
         command.add_argument("--runtime-root", type=Path, required=True)
         command.add_argument("--artifact-root", type=Path, required=True)
         if name == "run":
@@ -54,18 +53,11 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "status":
         output = campaign_status(config, args.artifact_root)
     elif args.command == "bootstrap":
-        output = bootstrap(
-            config,
-            args.repository,
-            args.engine_kit_root,
-            args.runtime_root,
-            args.artifact_root,
-        )
+        output = bootstrap(config, args.repository, args.runtime_root, args.artifact_root)
     elif args.command == "preflight":
         output = preflight(
             config,
             args.repository,
-            args.engine_kit_root,
             args.runtime_root,
             args.artifact_root,
             require_clean_benchmarker=True,
@@ -79,7 +71,6 @@ def main(argv: list[str] | None = None) -> int:
         output = run_campaign(
             config,
             args.repository,
-            args.engine_kit_root,
             args.runtime_root,
             args.artifact_root,
             [sys.executable, "-m", "runner.sage_gnu_campaign", *(argv or sys.argv[1:])],

@@ -1,10 +1,12 @@
 """Two-human GNU board referee with decisions delegated to Engine Kit."""
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
 import pty
+import shutil
 import re
 import selectors
 import subprocess
@@ -27,6 +29,13 @@ PROMPT_RE = re.compile(rb"\x1b\[\?2004h[^\r\n]*\) $")
 MANUAL_DICE = b"Enter dice:"
 
 
+def _board_environment(environment: dict[str, str], isolated_home: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(environment)
+    env["HOME"] = str(Path(isolated_home).resolve())
+    return env
+
+
 class MatchExecutionError(RuntimeError):
     """The neutral board process or verified Engine Kit decision failed."""
 
@@ -34,27 +43,61 @@ class MatchExecutionError(RuntimeError):
 class GnuBoardProcess:
     """Use pinned GNU only as a two-human board/rules process, never as evaluator."""
 
-    def __init__(self, executable: Path, environment: dict[str, str], dice: SeatDiceController):
-        env = os.environ.copy()
-        env.update(environment)
-        self.master_fd, slave_fd = pty.openpty()
-        attributes = termios.tcgetattr(slave_fd)
-        attributes[3] &= ~termios.ECHO
-        termios.tcsetattr(slave_fd, termios.TCSANOW, attributes)
-        self.process = subprocess.Popen(
-            [str(executable), "-q", "-t"],
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            env=env,
-            close_fds=True,
-        )
-        os.close(slave_fd)
-        self.dice = dice
-        self.selector = selectors.DefaultSelector()
-        self.selector.register(self.master_fd, selectors.EVENT_READ)
-        self.transcript: list[dict[str, str]] = []
-        self._read_until_prompt("<startup>")
+    def __init__(
+        self,
+        executable: Path,
+        environment: dict[str, str],
+        dice: SeatDiceController,
+        isolated_home: Path,
+    ):
+        self.isolated_home = Path(isolated_home).resolve()
+        self.isolated_home.mkdir(parents=False, exist_ok=False)
+        env = _board_environment(environment, self.isolated_home)
+        self.master_fd = -1
+        try:
+            self.master_fd, slave_fd = pty.openpty()
+            try:
+                attributes = termios.tcgetattr(slave_fd)
+                attributes[3] &= ~termios.ECHO
+                termios.tcsetattr(slave_fd, termios.TCSANOW, attributes)
+                self.process = subprocess.Popen(
+                    [str(executable), "-q", "-t"],
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    env=env,
+                    close_fds=True,
+                )
+            finally:
+                os.close(slave_fd)
+            self.dice = dice
+            self.selector = selectors.DefaultSelector()
+            self.selector.register(self.master_fd, selectors.EVENT_READ)
+            self.transcript: list[dict[str, str]] = []
+            self._read_until_prompt("<startup>")
+        except Exception:
+            self._cleanup(terminate=True)
+            raise
+
+    def _cleanup(self, *, terminate: bool) -> None:
+        process = getattr(self, "process", None)
+        if process is not None and terminate and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5.0)
+        selector = getattr(self, "selector", None)
+        if selector is not None:
+            selector.close()
+        if getattr(self, "master_fd", -1) >= 0:
+            try:
+                os.close(self.master_fd)
+            except OSError:
+                pass
+            self.master_fd = -1
+        shutil.rmtree(self.isolated_home, ignore_errors=True)
 
     def _read_until_prompt(self, command: str, timeout_seconds: float = 60.0) -> str:
         deadline = time.monotonic() + timeout_seconds
@@ -66,7 +109,16 @@ class GnuBoardProcess:
                 if self.process.poll() is not None:
                     raise MatchExecutionError(f"GNU board process exited during {command!r}")
                 continue
-            chunk = os.read(self.master_fd, 65536)
+            try:
+                chunk = os.read(self.master_fd, 65536)
+            except OSError as exc:
+                if exc.errno == errno.EIO:
+                    detail = ANSI_RE.sub("", buffer.decode("utf-8", "replace")).replace("\r", "").strip()
+                    raise MatchExecutionError(
+                        f"GNU board process closed PTY during {command!r}; "
+                        f"returncode={self.process.poll()}: {detail[-1000:]}"
+                    ) from exc
+                raise
             if not chunk:
                 raise MatchExecutionError(f"GNU board process closed output during {command!r}")
             buffer += chunk
@@ -88,17 +140,14 @@ class GnuBoardProcess:
         return self._read_until_prompt(command, timeout_seconds)
 
     def close(self) -> None:
-        if self.process.poll() is None:
-            try:
-                self.send("quit", timeout_seconds=10.0)
-            except Exception:
-                self.process.terminate()
+        try:
+            if self.process.poll() is None:
                 try:
-                    self.process.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-        self.selector.close()
-        os.close(self.master_fd)
+                    self.send("quit", timeout_seconds=10.0)
+                except Exception:
+                    pass
+        finally:
+            self._cleanup(terminate=True)
 
 
 def _gnuid(board: str) -> str:
@@ -224,6 +273,7 @@ class PairExecutor:
             self.engine_kit.gnu_runtime.executable,
             self.engine_kit.gnu_runtime.environment(),
             dice,
+            match_root / ".gnubg-home",
         )
         decision_path = match_root / "decisions.jsonl"
         decisions = 0

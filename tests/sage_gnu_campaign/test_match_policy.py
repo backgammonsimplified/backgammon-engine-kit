@@ -12,6 +12,7 @@ from runner.sage_gnu_campaign.manifests import write_json
 from runner.sage_gnu_campaign.match import (
     MatchExecutionError,
     PairExecutor,
+    _board_environment,
     _recommended_checker_notation,
     pending_double_response,
     pre_roll_cube_action,
@@ -20,6 +21,19 @@ from runner.sage_gnu_campaign.match import (
 
 REPO = Path(__file__).resolve().parents[2]
 CONFIG = REPO / "experiments/sage-gnu-campaign-v1/campaign.json"
+
+
+def test_board_environment_overrides_engine_kit_dev_null_home(tmp_path: Path) -> None:
+    isolated = tmp_path / "gnubg-home"
+    env = _board_environment(
+        {"HOME": "/dev/null", "LANG": "C", "LC_ALL": "C", "OMP_NUM_THREADS": "1"},
+        isolated,
+    )
+    assert env["HOME"] == str(isolated.resolve())
+    assert env["HOME"] != "/dev/null"
+    assert env["LANG"] == "C"
+    assert env["LC_ALL"] == "C"
+    assert env["OMP_NUM_THREADS"] == "1"
 
 
 def cube_decision(take: object, passed: object, recommendation: str = "no-double") -> dict:

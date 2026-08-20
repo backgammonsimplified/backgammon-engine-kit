@@ -8,6 +8,8 @@ Both Sage and GNU use `threads=1`. GNU checker `3ply` is a configured target; th
 
 For a pending normal double, responder policy compares normalized `double-take` and `double-pass` doubler equities and fails closed on absent, non-numeric, tied, beaver, or raccoon data.
 
+The long-lived two-human GNU board process uses a fresh empty HOME beneath each match attempt so GNU cannot read operator `~/.gnubg` state and does not inherit Engine Kit evaluator `HOME=/dev/null`. The temporary board HOME is removed before immutable pair publication. Engine Kit evaluator subprocesses retain their separately validated runtime environment.
+
 ## Public release-backed environment
 
 No Engine Kit source checkout is used for production execution. From the public campaign branch root, bootstrap the campaign-owned runner environment with the public `v0.4.0` release wheel and the committed hash-locked dependencies:

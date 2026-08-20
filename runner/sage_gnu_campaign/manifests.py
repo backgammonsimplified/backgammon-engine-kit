@@ -122,23 +122,31 @@ def benchmarker_git_identity(repository: Path, config: CampaignConfig) -> dict[s
     }
 
 
-def engine_kit_git_identity(repository: Path, config: CampaignConfig) -> dict[str, Any]:
+def engine_kit_release_identity(repository: Path, config: CampaignConfig) -> dict[str, Any]:
     repository = Path(repository).resolve()
     expected = config.data["engine_kit"]
-    head = git_output(repository, "rev-parse", "HEAD")
-    branch = git_output(repository, "branch", "--show-current")
-    status = git_output(repository, "status", "--porcelain", "--untracked-files=all")
-    if head != expected["source_commit"] or branch != expected["branch"]:
-        raise ProvenanceError("Engine Kit source checkout does not match committed authority")
-    if status:
-        raise ProvenanceError("Engine Kit source checkout must be clean")
+    lock = repository / expected["production_dependency_lock"]["path"]
+    if not lock.is_file() or sha256_file(lock) != expected["production_dependency_lock"]["sha256"]:
+        raise ProvenanceError("committed Engine Kit production dependency lock identity mismatch")
+    release = expected["release"]
+    wheel_url = (
+        f"https://raw.githubusercontent.com/{expected['repository']}/{release['tag']}"
+        f"/release-assets/v0.4.0/{release['wheel_filename']}"
+    )
     return {
         "repository": expected["repository"],
-        "branch": branch,
-        "source_commit": head,
+        "branch": expected["branch"],
+        "source_commit": expected["source_commit"],
+        "release_commit": expected["release_commit"],
         "base_commit": expected["base_commit"],
         "release": expected["release"],
-        "clean": True,
+        "production_dependency_lock": expected["production_dependency_lock"],
+        "wheel_source_url": wheel_url,
+        "dependency_lock_asset": {
+            "path": lock.relative_to(repository).as_posix(),
+            "sha256": sha256_file(lock),
+        },
+        "installation_authority": "public-release-wheel-plus-committed-hash-lock",
     }
 
 
@@ -234,7 +242,5 @@ def common_manifest(
         "match_length_points": config.data["match"]["length_points"],
         "mirrored_physical_seat_mapping": config.data["match"]["members"],
         "dice_protocol": config.data["dice"]["protocol"],
-        "candidate_actual_depth_evidence_template": config.data["manifest_policy"][
-            "candidate_actual_depth_evidence"
-        ],
+        "candidate_actual_depth_evidence_template": config.data["manifest_policy"]["candidate_actual_depth_evidence"],
     }

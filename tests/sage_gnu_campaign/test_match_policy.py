@@ -298,12 +298,12 @@ class FakeEngineKit:
             {24: 2, 13: 4, 8: 4, 6: 5},
         )
         both_moved = fake_board_state(
-            {24: 2, 13: 4, 8: 4, 6: 5},
+            {24: 2, 13: 4, 9: 1, 8: 3, 6: 5},
             {24: 2, 13: 4, 8: 4, 6: 5},
         )
         x_moved_again = fake_board_state(
-            {24: 2, 13: 4, 8: 4, 6: 5},
-            {24: 2, 13: 3, 8: 5, 6: 5},
+            {24: 2, 13: 4, 9: 1, 8: 3, 6: 5},
+            {24: 2, 13: 3, 9: 1, 8: 4, 6: 5},
         )
         self.position_values = [
                 position(0, "player_0", "none", (3, 1), board=first_game, cube_value=2),
@@ -337,7 +337,7 @@ class FakeEngineKit:
         ]
         self.positions = iter(self.position_values)
         self.analysis_calls: list[tuple[str, str]] = []
-        self.checker_commands = iter(["1/off", "13/8", "13/8", "13/8"])
+        self.checker_commands = iter(["1/off", "13/9/8", "13/10/9", "13/11/9"])
 
     def position_from_gnuid(self, gnuid: str) -> object:
         assert gnuid.startswith("P")
@@ -417,14 +417,16 @@ def test_run_match_simulates_all_normal_policy_paths_without_board_evaluation(
         ("gnu", "cube"),
     ]
     assert FakeBoard.last is not None
-    assert [command for command in FakeBoard.last.commands if command in {"roll", "double", "take", "pass", "1/off", "13/8"}] == [
+    assert [command for command in FakeBoard.last.commands if command in {
+        "roll", "double", "take", "pass", "1/off", "13/9/8", "13/10/9", "13/11/9"
+    }] == [
         "1/off",
-        "13/8",
+        "13/9/8",
         "roll",
-        "13/8",
+        "13/10/9",
         "double",
         "take",
-        "13/8",
+        "13/11/9",
         "double",
         "pass",
     ]
@@ -544,6 +546,15 @@ def test_resignation_accept_requires_exact_score_cube_action_and_turn_state() ->
             "accept", before, after, [], 1, "O", "sage", mapping, "X", True
         )
 
+    mislabeled = position(
+        8, None, "none", None,
+        on_roll="player_1", cube_value=2, game_state="game_over",
+    )
+    with pytest.raises(MatchExecutionError, match="invalid turn/action state"):
+        _validate_command_transition(
+            "accept", before, mislabeled, [], 1, "O", "sage", mapping, "X", True
+        )
+
 
 def test_checker_move_reconciles_an_automatically_consumed_next_roll_exactly() -> None:
     mapping = {"O": "sage", "X": "gnu"}
@@ -567,6 +578,151 @@ def test_checker_move_reconciles_an_automatically_consumed_next_roll_exactly() -
     with pytest.raises(MatchExecutionError, match="wrong board, cube, action, dice, or turn"):
         _validate_command_transition(
             "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", False
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "stale-offerer",
+        "stale-responder",
+        "stale-offered-cube",
+        "stale-resignation",
+        "pending-double",
+    ],
+)
+def test_checker_transition_rejects_every_stale_action_field(case: str) -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before = position(
+        0, "player_0", "none", (5, 1),
+        board=fake_board_state({13: 1}, {24: 1}, off_0=14, off_1=14),
+    )
+    after = position(
+        0, "player_1", "none", None,
+        board=fake_board_state({8: 1}, {24: 1}, off_0=14, off_1=14),
+    )
+    pending = after.cube.pending_action
+    if case == "stale-offerer":
+        pending.offerer = "player_0"
+    elif case == "stale-responder":
+        pending.responder = "player_1"
+    elif case == "stale-offered-cube":
+        pending.offered_cube_value = 2
+    elif case == "stale-resignation":
+        pending.resignation_multiplier = 1
+    elif case == "pending-double":
+        pending.type = "double"
+        pending.offerer = "player_0"
+        pending.responder = "player_1"
+        pending.offered_cube_value = 2
+
+    with pytest.raises(MatchExecutionError, match="wrong board, cube, action, dice, or turn"):
+        _validate_command_transition(
+            "13/8", before, after, [], 1, "O", "sage", mapping, "X", False
+        )
+
+
+def test_checker_transition_requires_command_to_agree_with_previous_dice() -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before = position(
+        0, "player_0", "none", (4, 1),
+        board=fake_board_state({13: 1}, {24: 1}, off_0=14, off_1=14),
+    )
+    after = position(
+        0, "player_1", "none", None,
+        board=fake_board_state({8: 1}, {24: 1}, off_0=14, off_1=14),
+    )
+    with pytest.raises(MatchExecutionError, match="prior dice"):
+        _validate_command_transition(
+            "13/8", before, after, [], 1, "O", "sage", mapping, "X", False
+        )
+
+
+def test_roll_transition_rejects_unexpected_action_metadata() -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before = position(0, "player_0", "none", None)
+    after = position(0, "player_0", "none", (3, 2))
+    consumed = [{
+        "prompt_type": "checker", "game_number": 1, "physical_seat": "O",
+        "engine": "sage", "die1": 3, "die2": 2,
+    }]
+    _validate_command_transition(
+        "roll", before, after, consumed, 1, "O", "sage", mapping, "X", False
+    )
+    after.cube.pending_action.resignation_multiplier = 1
+    with pytest.raises(MatchExecutionError, match="changed checker or cube state"):
+        _validate_command_transition(
+            "roll", before, after, consumed, 1, "O", "sage", mapping, "X", False
+        )
+
+
+@pytest.mark.parametrize("case", ["wrong-owner", "wrong-value", "resignation", "stale-offer"])
+def test_take_transition_requires_exact_cube_and_cleared_action(case: str) -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before = position(
+        0, "player_1", "double", None,
+        on_roll="player_0", offerer="player_0", responder="player_1",
+        offered_cube_value=2,
+    )
+    after = position(
+        0, "player_0", "none", None,
+        cube_value=2, cube_owner="player_1",
+    )
+    if case == "wrong-owner":
+        after.cube.owner = "player_0"
+    elif case == "wrong-value":
+        after.cube.value = 4
+    elif case == "resignation":
+        after.cube.pending_action.type = "resignation"
+        after.cube.pending_action.offerer = "player_0"
+        after.cube.pending_action.responder = "player_1"
+        after.cube.pending_action.resignation_multiplier = 1
+    elif case == "stale-offer":
+        after.cube.pending_action.offered_cube_value = 2
+
+    with pytest.raises(MatchExecutionError, match="wrong cube, action, dice, or turn state"):
+        _validate_command_transition(
+            "take", before, after, [], 1, "X", "gnu", mapping, "O", False
+        )
+
+
+def test_pass_requires_game_over_not_resigned() -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before = position(
+        6, "player_1", "double", None,
+        on_roll="player_0", offerer="player_0", responder="player_1",
+        offered_cube_value=2,
+    )
+    valid = position(7, None, "none", None, on_roll="player_0", game_state="game_over")
+    _validate_command_transition(
+        "pass", before, valid, [], 1, "X", "gnu", mapping, "O", True
+    )
+    mislabeled = position(7, None, "none", None, on_roll="player_0", game_state="resigned")
+    with pytest.raises(MatchExecutionError, match="invalid turn/action state"):
+        _validate_command_transition(
+            "pass", before, mislabeled, [], 1, "X", "gnu", mapping, "O", True
+        )
+
+
+def test_normal_bearoff_requires_game_over_not_resigned() -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before_board = fake_board_state({1: 1}, {24: 1}, off_0=14, off_1=14)
+    final_board = fake_board_state({}, {24: 1}, off_0=15, off_1=14)
+    before = position(6, "player_0", "none", (1, 1), board=before_board)
+    valid = position(
+        7, None, "none", None, board=final_board,
+        on_roll="player_0", game_state="game_over",
+    )
+    _validate_command_transition(
+        "1/off", before, valid, [], 1, "O", "sage", mapping, "X", True
+    )
+    mislabeled = position(
+        7, None, "none", None, board=final_board,
+        on_roll="player_0", game_state="resigned",
+    )
+    with pytest.raises(MatchExecutionError, match="invalid turn/action state"):
+        _validate_command_transition(
+            "1/off", before, mislabeled, [], 1, "O", "sage", mapping, "X", True
         )
 
 

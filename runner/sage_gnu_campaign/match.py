@@ -522,6 +522,15 @@ def _simulate_checker_move(position: Any, physical_seat: str, notation: str) -> 
     offs = [snapshot[4], snapshot[7]]
     actor = 0 if physical_seat == "O" else 1
     opponent = 1 - actor
+    raw_dice = position.state.dice
+    if (
+        not isinstance(raw_dice, (list, tuple))
+        or len(raw_dice) != 2
+        or any(type(value) is not int or not 1 <= value <= 6 for value in raw_dice)
+    ):
+        raise MatchExecutionError("GNU checker command has missing or malformed prior dice")
+    available_dice = list(raw_dice) * (2 if raw_dice[0] == raw_dice[1] else 1)
+    movement_dice: list[set[int]] = []
     tokens = notation.split()
     if not tokens:
         raise MatchExecutionError("GNU checker command is empty")
@@ -546,12 +555,14 @@ def _simulate_checker_move(position: Any, physical_seat: str, notation: str) -> 
         for _ in range(multiplier):
             for source, destination in zip(locations, locations[1:]):
                 if source == "bar":
+                    source_number = 25
                     if bars[actor] <= 0:
                         raise MatchExecutionError("GNU checker notation moves an absent bar checker")
                     bars[actor] -= 1
                 elif source == "off":
                     raise MatchExecutionError("GNU checker notation moves a borne-off checker")
                 else:
+                    source_number = int(source)
                     source_index = int(source) - 1
                     if points[actor][source_index] <= 0:
                         raise MatchExecutionError("GNU checker notation moves an absent checker")
@@ -559,9 +570,17 @@ def _simulate_checker_move(position: Any, physical_seat: str, notation: str) -> 
                 if destination == "bar":
                     raise MatchExecutionError("GNU checker notation cannot move to the bar")
                 if destination == "off":
+                    allowed = {source_number}
+                    if not any(points[actor][source_number:]):
+                        allowed.update(die for die in available_dice if die > source_number)
+                    movement_dice.append(allowed)
                     offs[actor] += 1
                     continue
                 destination_index = int(destination) - 1
+                distance = source_number - int(destination)
+                if distance <= 0:
+                    raise MatchExecutionError("GNU checker notation moves in the wrong direction")
+                movement_dice.append({distance})
                 opponent_index = 23 - destination_index
                 if points[opponent][opponent_index] > 1:
                     raise MatchExecutionError("GNU checker notation lands on a blocked point")
@@ -569,6 +588,22 @@ def _simulate_checker_move(position: Any, physical_seat: str, notation: str) -> 
                     points[opponent][opponent_index] = 0
                     bars[opponent] += 1
                 points[actor][destination_index] += 1
+    if len(movement_dice) > len(available_dice):
+        raise MatchExecutionError("GNU checker notation uses more moves than the prior dice permit")
+
+    def dice_can_cover(index: int, remaining: list[int]) -> bool:
+        if index == len(movement_dice):
+            return True
+        for die in sorted(movement_dice[index]):
+            if die in remaining:
+                reduced = list(remaining)
+                reduced.remove(die)
+                if dice_can_cover(index + 1, reduced):
+                    return True
+        return False
+
+    if not dice_can_cover(0, available_dice):
+        raise MatchExecutionError("GNU checker notation does not agree with the prior dice")
     return (
         checker_counts[0], checker_counts[1], tuple(points[0]), bars[0], offs[0],
         tuple(points[1]), bars[1], offs[1],
@@ -655,6 +690,9 @@ def _validate_command_transition(
     previous_board = _board_snapshot(position)
     next_board = _board_snapshot(next_position)
     cube_value = _validate_cube_value(position.cube.value, "current")
+    empty_current_cube = (
+        cube_value, position.cube.owner, "none", None, None, None, None
+    )
     score_delta = (next_score[0] - previous_score[0], next_score[1] - previous_score[1])
     score_changed = score_delta != (0, 0)
     if score_changed != reported_completion:
@@ -665,7 +703,13 @@ def _validate_command_transition(
     expected_points: int | None = None
     expected_final_board: tuple[Any, ...] | None = None
     if checker_command:
-        if pending.type != "none" or state.on_roll != actor or state.dice is None:
+        if (
+            previous_cube != empty_current_cube
+            or state.on_roll != actor
+            or not isinstance(state.dice, (list, tuple))
+            or len(state.dice) != 2
+            or any(type(value) is not int or not 1 <= value <= 6 for value in state.dice)
+        ):
             raise MatchExecutionError("GNU checker command precondition is semantically invalid")
         expected_final_board = _simulate_checker_move(position, physical_seat, command)
         if expected_final_board == previous_board:
@@ -686,18 +730,23 @@ def _validate_command_transition(
         elif score_changed:
             raise MatchExecutionError("GNU checker command awarded points before bearing off all checkers")
     elif command in {"roll", "double"}:
-        if pending.type != "none" or state.on_roll != actor or state.dice is not None:
+        if (
+            previous_cube != empty_current_cube
+            or state.on_roll != actor
+            or state.dice is not None
+        ):
             raise MatchExecutionError(f"GNU {command} precondition is semantically invalid")
         if command == "double" and position.cube.owner not in {"center", actor}:
             raise MatchExecutionError("GNU double precondition has the wrong cube owner")
     elif command in {"take", "pass"}:
+        expected_double = (
+            cube_value, position.cube.owner, "double", other, actor,
+            cube_value * 2, None,
+        )
         if (
-            pending.type != "double"
-            or pending.responder != actor
-            or pending.offerer != other
+            previous_cube != expected_double
             or state.on_roll != other
             or state.dice is not None
-            or pending.offered_cube_value != cube_value * 2
             or position.cube.owner not in {"center", other}
         ):
             raise MatchExecutionError(f"GNU {command} precondition is semantically invalid")
@@ -705,14 +754,16 @@ def _validate_command_transition(
         expected_points = cube_value if command == "pass" else None
     elif command == "accept":
         multiplier = pending.resignation_multiplier
+        expected_resignation = (
+            cube_value, position.cube.owner, "resignation", other, actor,
+            None, multiplier,
+        )
         if (
-            pending.type != "resignation"
-            or pending.responder != actor
-            or pending.offerer != other
+            previous_cube != expected_resignation
             or state.on_roll != other
+            or state.dice is not None
             or type(multiplier) is not int
             or not 1 <= multiplier <= 3
-            or pending.offered_cube_value is not None
         ):
             raise MatchExecutionError("GNU resignation precondition is semantically invalid")
         winner = actor
@@ -734,7 +785,12 @@ def _validate_command_transition(
         if match_complete:
             if consumed:
                 raise MatchExecutionError("GNU consumed opening dice after the match was complete")
-            if next_state.game_state not in {"game_over", "resigned"} or next_state.decision_player is not None or next_state.dice is not None:
+            expected_terminal_state = "resigned" if command == "accept" else "game_over"
+            if (
+                next_state.game_state != expected_terminal_state
+                or next_state.decision_player is not None
+                or next_state.dice is not None
+            ):
                 raise MatchExecutionError("GNU match completion retained an invalid turn/action state")
             completed_cube = (
                 previous_cube[0], previous_cube[1], "none", None, None, None, None
@@ -745,10 +801,14 @@ def _validate_command_transition(
             if next_board != expected_board:
                 raise MatchExecutionError("GNU match completion has the wrong resulting checker board")
         else:
-            if not _is_starting_board(next_position):
-                raise MatchExecutionError("GNU next game did not reset to the exact starting checker board")
-            if next_position.cube.value != 1 or next_position.cube.owner != "center" or next_position.cube.pending_action.type != "none":
-                raise MatchExecutionError("GNU next game did not reset cube ownership/value/action state")
+            _validate_opening_transition(
+                consumed,
+                game_number + 1,
+                next_position,
+                engine_by_seat,
+                expected_next_roll_seat,
+                next_score[:2],
+            )
         return
 
     if reported_completion:
@@ -801,9 +861,7 @@ def _validate_command_transition(
             or next_state.on_roll != other
             or next_state.decision_player != other
             or (tuple(next_state.dice) if next_state.dice is not None else None) != observed
-            or next_position.cube.value != cube_value
-            or next_position.cube.owner != position.cube.owner
-            or next_position.cube.pending_action.type != "none"
+            or next_cube != empty_current_cube
         ):
             raise MatchExecutionError("GNU checker command produced the wrong board, cube, action, dice, or turn state")
     else:

@@ -330,6 +330,369 @@ def _seat(player: str) -> str:
     raise MatchExecutionError(f"unsupported player identity: {player}")
 
 
+def _player(seat: str) -> str:
+    if seat == "O":
+        return "player_0"
+    if seat == "X":
+        return "player_1"
+    raise MatchExecutionError(f"unsupported physical seat: {seat}")
+
+
+def _opposite_seat(seat: str) -> str:
+    if seat == "O":
+        return "X"
+    if seat == "X":
+        return "O"
+    raise MatchExecutionError(f"unsupported physical seat: {seat}")
+
+
+def _board_snapshot(position: Any) -> tuple[Any, ...]:
+    try:
+        board = position.board
+        return (
+            int(board.checker_count.player_0),
+            int(board.checker_count.player_1),
+            tuple(int(value) for value in board.player_0.points),
+            int(board.player_0.bar),
+            int(board.player_0.off),
+            tuple(int(value) for value in board.player_1.points),
+            int(board.player_1.bar),
+            int(board.player_1.off),
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise MatchExecutionError("GNU board checker state is missing or malformed") from exc
+
+
+def _cube_snapshot(position: Any) -> tuple[Any, ...]:
+    try:
+        pending = position.cube.pending_action
+        return (
+            position.cube.value,
+            position.cube.owner,
+            pending.type,
+            pending.offerer,
+            pending.responder,
+            pending.offered_cube_value,
+            pending.resignation_multiplier,
+        )
+    except AttributeError as exc:
+        raise MatchExecutionError("GNU cube state is missing or malformed") from exc
+
+
+def _score_snapshot(position: Any) -> tuple[int, int, int]:
+    try:
+        return (
+            int(position.score.player_0),
+            int(position.score.player_1),
+            int(position.score.match_length),
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise MatchExecutionError("GNU match score is missing or malformed") from exc
+
+
+def _validate_cube_value(value: Any, label: str) -> int:
+    if type(value) is not int or value <= 0 or value & (value - 1):
+        raise MatchExecutionError(f"GNU {label} cube value is missing or malformed")
+    return value
+
+
+def _simulate_checker_move(position: Any, physical_seat: str, notation: str) -> tuple[Any, ...]:
+    """Apply ordinary GNU move notation to a canonical self-relative board."""
+    snapshot = _board_snapshot(position)
+    checker_counts = [snapshot[0], snapshot[1]]
+    points = [list(snapshot[2]), list(snapshot[5])]
+    bars = [snapshot[3], snapshot[6]]
+    offs = [snapshot[4], snapshot[7]]
+    actor = 0 if physical_seat == "O" else 1
+    opponent = 1 - actor
+    tokens = notation.split()
+    if not tokens:
+        raise MatchExecutionError("GNU checker command is empty")
+    for token in tokens:
+        multiplier = 1
+        repeated = re.search(r"\((\d+)\)$", token)
+        if repeated is not None:
+            multiplier = int(repeated.group(1))
+            token = token[: repeated.start()]
+        locations = [part.rstrip("*").lower() for part in token.split("/")]
+        if (
+            multiplier <= 0
+            or len(locations) < 2
+            or locations[0] == "off"
+            or any(
+                location not in {"bar", "off"}
+                and (not location.isdigit() or not 1 <= int(location) <= 24)
+                for location in locations
+            )
+        ):
+            raise MatchExecutionError(f"unsupported GNU checker notation: {notation!r}")
+        for _ in range(multiplier):
+            for source, destination in zip(locations, locations[1:]):
+                if source == "bar":
+                    if bars[actor] <= 0:
+                        raise MatchExecutionError("GNU checker notation moves an absent bar checker")
+                    bars[actor] -= 1
+                elif source == "off":
+                    raise MatchExecutionError("GNU checker notation moves a borne-off checker")
+                else:
+                    source_index = int(source) - 1
+                    if points[actor][source_index] <= 0:
+                        raise MatchExecutionError("GNU checker notation moves an absent checker")
+                    points[actor][source_index] -= 1
+                if destination == "bar":
+                    raise MatchExecutionError("GNU checker notation cannot move to the bar")
+                if destination == "off":
+                    offs[actor] += 1
+                    continue
+                destination_index = int(destination) - 1
+                opponent_index = 23 - destination_index
+                if points[opponent][opponent_index] > 1:
+                    raise MatchExecutionError("GNU checker notation lands on a blocked point")
+                if points[opponent][opponent_index] == 1:
+                    points[opponent][opponent_index] = 0
+                    bars[opponent] += 1
+                points[actor][destination_index] += 1
+    return (
+        checker_counts[0], checker_counts[1], tuple(points[0]), bars[0], offs[0],
+        tuple(points[1]), bars[1], offs[1],
+    )
+
+
+def _is_starting_board(position: Any) -> bool:
+    points = (0, 0, 0, 0, 0, 5, 0, 3, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2)
+    return _board_snapshot(position) == (15, 15, points, 0, 0, points, 0, 0)
+
+
+def _validate_consumed_checker_roll(
+    consumed: list[dict[str, Any]],
+    game_number: int,
+    expected_seat: str,
+    engine_by_seat: Mapping[str, str],
+    expected_next_roll_seat: str | None,
+    *,
+    required: bool,
+) -> tuple[int, int] | None:
+    if (required and len(consumed) != 1) or (not required and len(consumed) > 1):
+        raise MatchExecutionError("GNU command consumed an impossible number of manual dice records")
+    if not consumed:
+        if required:
+            raise MatchExecutionError("GNU roll did not consume exactly one manual dice record")
+        if expected_next_roll_seat != expected_seat:
+            raise MatchExecutionError("GNU manual-dice controller expected the wrong physical seat")
+        return None
+    entry = consumed[0]
+    die1, die2 = entry.get("die1"), entry.get("die2")
+    if (
+        entry.get("prompt_type") != "checker"
+        or entry.get("game_number") != game_number
+        or type(entry.get("game_number")) is not int
+        or entry.get("physical_seat") != expected_seat
+        or entry.get("engine") != engine_by_seat.get(expected_seat)
+        or type(die1) is not int
+        or type(die2) is not int
+        or not 1 <= die1 <= 6
+        or not 1 <= die2 <= 6
+    ):
+        raise MatchExecutionError("GNU manual dice were consumed for the wrong game, physical seat, or engine")
+    if expected_next_roll_seat != _opposite_seat(expected_seat):
+        raise MatchExecutionError("GNU manual-dice consumption left the wrong physical seat next")
+    return die1, die2
+
+
+def _validate_command_transition(
+    command: str,
+    position: Any,
+    next_position: Any,
+    consumed: list[dict[str, Any]],
+    game_number: int,
+    physical_seat: str,
+    engine: str,
+    engine_by_seat: Mapping[str, str],
+    expected_next_roll_seat: str | None,
+    reported_completion: bool,
+) -> None:
+    """Fail closed unless a changed GNU ID represents the commanded transition."""
+    if (
+        set(engine_by_seat) != {"O", "X"}
+        or set(engine_by_seat.values()) != {"sage", "gnu"}
+        or engine_by_seat.get(physical_seat) != engine
+    ):
+        raise MatchExecutionError("GNU command actor is bound to the wrong physical-seat engine")
+    actor = _player(physical_seat)
+    other_seat = _opposite_seat(physical_seat)
+    other = _player(other_seat)
+    try:
+        state = position.state
+        next_state = next_position.state
+        pending = position.cube.pending_action
+    except AttributeError as exc:
+        raise MatchExecutionError("GNU command state is missing or malformed") from exc
+    if state.game_state != "playing" or state.decision_player != actor:
+        raise MatchExecutionError("GNU command actor does not match the expected physical seat")
+    previous_score = _score_snapshot(position)
+    next_score = _score_snapshot(next_position)
+    if previous_score[2] != 7 or next_score[2] != 7:
+        raise MatchExecutionError("GNU command changed the frozen match length")
+    previous_cube = _cube_snapshot(position)
+    next_cube = _cube_snapshot(next_position)
+    previous_board = _board_snapshot(position)
+    next_board = _board_snapshot(next_position)
+    cube_value = _validate_cube_value(position.cube.value, "current")
+    score_delta = (next_score[0] - previous_score[0], next_score[1] - previous_score[1])
+    score_changed = score_delta != (0, 0)
+    if score_changed != reported_completion:
+        raise MatchExecutionError("GNU completed-game output/state transition is missing or misparsed")
+
+    checker_command = command not in {"roll", "double", "take", "pass", "accept"}
+    winner: str | None = None
+    expected_points: int | None = None
+    expected_final_board: tuple[Any, ...] | None = None
+    if checker_command:
+        if pending.type != "none" or state.on_roll != actor or state.dice is None:
+            raise MatchExecutionError("GNU checker command precondition is semantically invalid")
+        expected_final_board = _simulate_checker_move(position, physical_seat, command)
+        if expected_final_board == previous_board:
+            raise MatchExecutionError("GNU checker command did not move a checker")
+        winner = actor
+        actor_offset = 4 if physical_seat == "O" else 7
+        if expected_final_board[actor_offset] == expected_final_board[0 if physical_seat == "O" else 1]:
+            loser_offset = 7 if physical_seat == "O" else 4
+            loser_bar_offset = 6 if physical_seat == "O" else 3
+            loser_points_offset = 5 if physical_seat == "O" else 2
+            multiplier = 1
+            if expected_final_board[loser_offset] == 0:
+                multiplier = 3 if (
+                    expected_final_board[loser_bar_offset] > 0
+                    or any(expected_final_board[loser_points_offset][18:24])
+                ) else 2
+            expected_points = cube_value * multiplier
+        elif score_changed:
+            raise MatchExecutionError("GNU checker command awarded points before bearing off all checkers")
+    elif command in {"roll", "double"}:
+        if pending.type != "none" or state.on_roll != actor or state.dice is not None:
+            raise MatchExecutionError(f"GNU {command} precondition is semantically invalid")
+        if command == "double" and position.cube.owner not in {"center", actor}:
+            raise MatchExecutionError("GNU double precondition has the wrong cube owner")
+    elif command in {"take", "pass"}:
+        if (
+            pending.type != "double"
+            or pending.responder != actor
+            or pending.offerer != other
+            or state.on_roll != other
+            or state.dice is not None
+            or pending.offered_cube_value != cube_value * 2
+            or position.cube.owner not in {"center", other}
+        ):
+            raise MatchExecutionError(f"GNU {command} precondition is semantically invalid")
+        winner = other if command == "pass" else None
+        expected_points = cube_value if command == "pass" else None
+    elif command == "accept":
+        multiplier = pending.resignation_multiplier
+        if (
+            pending.type != "resignation"
+            or pending.responder != actor
+            or pending.offerer != other
+            or state.on_roll != other
+            or type(multiplier) is not int
+            or not 1 <= multiplier <= 3
+            or pending.offered_cube_value is not None
+        ):
+            raise MatchExecutionError("GNU resignation precondition is semantically invalid")
+        winner = actor
+        expected_points = cube_value * multiplier
+    else:  # pragma: no cover - all strings are checker commands or listed above
+        raise MatchExecutionError(f"unsupported GNU command transition: {command}")
+
+    if score_changed:
+        if winner is None or expected_points is None or consumed and not all(
+            entry.get("prompt_type") == "opening" for entry in consumed
+        ):
+            raise MatchExecutionError("GNU command produced an invalid completed-game transition")
+        winner_index = 0 if winner == "player_0" else 1
+        expected_delta = [0, 0]
+        expected_delta[winner_index] = expected_points
+        if score_delta != tuple(expected_delta):
+            raise MatchExecutionError("GNU command awarded the wrong score or winner")
+        match_complete = max(next_score[:2]) >= next_score[2]
+        if match_complete:
+            if consumed:
+                raise MatchExecutionError("GNU consumed opening dice after the match was complete")
+            if next_state.game_state not in {"game_over", "resigned"} or next_state.decision_player is not None or next_state.dice is not None:
+                raise MatchExecutionError("GNU match completion retained an invalid turn/action state")
+            completed_cube = (
+                previous_cube[0], previous_cube[1], "none", None, None, None, None
+            )
+            if next_state.on_roll != state.on_roll or next_cube != completed_cube:
+                raise MatchExecutionError("GNU match completion changed cube or turn ownership incorrectly")
+            expected_board = expected_final_board if checker_command else previous_board
+            if next_board != expected_board:
+                raise MatchExecutionError("GNU match completion has the wrong resulting checker board")
+        else:
+            if not _is_starting_board(next_position):
+                raise MatchExecutionError("GNU next game did not reset to the exact starting checker board")
+            if next_position.cube.value != 1 or next_position.cube.owner != "center" or next_position.cube.pending_action.type != "none":
+                raise MatchExecutionError("GNU next game did not reset cube ownership/value/action state")
+        return
+
+    if reported_completion:
+        raise MatchExecutionError("GNU reported a game completion without the exact score transition")
+    if consumed and any(entry.get("prompt_type") == "opening" for entry in consumed):
+        raise MatchExecutionError("GNU consumed opening dice without completing a game")
+    if next_state.game_state != "playing" or next_score != previous_score:
+        raise MatchExecutionError("GNU command left the active game or changed its score")
+
+    if command == "roll":
+        observed = _validate_consumed_checker_roll(
+            consumed, game_number, physical_seat, engine_by_seat, expected_next_roll_seat, required=True
+        )
+        if next_state.on_roll != actor or next_state.decision_player != actor or tuple(next_state.dice or ()) != observed:
+            raise MatchExecutionError("GNU roll attached the wrong dice, physical seat, or turn owner")
+        if next_board != previous_board or next_cube != previous_cube:
+            raise MatchExecutionError("GNU roll changed checker or cube state")
+    elif command == "double":
+        if consumed:
+            raise MatchExecutionError("GNU double unexpectedly consumed manual dice")
+        expected_pending = (cube_value, position.cube.owner, "double", actor, other, cube_value * 2, None)
+        if (
+            next_board != previous_board
+            or next_state.on_roll != actor
+            or next_state.decision_player != other
+            or next_state.dice is not None
+            or next_cube != expected_pending
+            or expected_next_roll_seat != physical_seat
+        ):
+            raise MatchExecutionError("GNU double produced the wrong cube, action, or turn state")
+    elif command == "take":
+        observed = _validate_consumed_checker_roll(
+            consumed, game_number, other_seat, engine_by_seat, expected_next_roll_seat, required=False
+        )
+        expected_pending = (cube_value * 2, actor, "none", None, None, None, None)
+        if (
+            next_board != previous_board
+            or next_state.on_roll != other
+            or next_state.decision_player != other
+            or (tuple(next_state.dice) if next_state.dice is not None else None) != observed
+            or next_cube != expected_pending
+        ):
+            raise MatchExecutionError("GNU take produced the wrong cube, action, dice, or turn state")
+    elif checker_command:
+        observed = _validate_consumed_checker_roll(
+            consumed, game_number, other_seat, engine_by_seat, expected_next_roll_seat, required=False
+        )
+        if (
+            next_board != expected_final_board
+            or next_state.on_roll != other
+            or next_state.decision_player != other
+            or (tuple(next_state.dice) if next_state.dice is not None else None) != observed
+            or next_position.cube.value != cube_value
+            or next_position.cube.owner != position.cube.owner
+            or next_position.cube.pending_action.type != "none"
+        ):
+            raise MatchExecutionError("GNU checker command produced the wrong board, cube, action, dice, or turn state")
+    else:
+        raise MatchExecutionError(f"GNU {command} failed to complete the required game transition")
+
+
 def _recommended_checker_notation(result: dict[str, Any]) -> str:
     try:
         decision = result["checker_decision"]
@@ -701,30 +1064,27 @@ class PairExecutor:
                     previous_score = (int(position.score.player_0), int(position.score.player_1))
                     output = board.send(command, timeout_seconds=120.0)
                     consumed = dice.consumption[before_consumption:]
-                    if command == "roll":
-                        if (
-                            len(consumed) != 1
-                            or consumed[0].get("prompt_type") != "checker"
-                            or consumed[0].get("physical_seat") != physical_seat
-                            or consumed[0].get("engine") != engine
-                        ):
-                            raise MatchExecutionError("GNU roll did not consume exactly one expected physical-seat dice record")
                     next_board_text = board.send("show board")
                     next_gnuid = _gnuid(next_board_text)
                     if next_gnuid == gnuid:
                         raise MatchExecutionError(f"GNU command {command!r} did not change board state")
                     next_position = self.engine_kit.position_from_gnuid(next_gnuid)
-                    if command == "roll":
-                        observed = next_position.state.dice
-                        expected = (int(consumed[0]["die1"]), int(consumed[0]["die2"]))
-                        if observed is None or sorted(int(v) for v in observed) != sorted(expected):
-                            raise MatchExecutionError("GNU board dice differ from the consumed physical-seat stream")
                     next_score = (int(next_position.score.player_0), int(next_position.score.player_1))
                     score_changed = next_score != previous_score
                     reported_completion = GAME_WIN_RE.search(output) is not None
+                    _validate_command_transition(
+                        command,
+                        position,
+                        next_position,
+                        consumed,
+                        game_number,
+                        physical_seat,
+                        engine,
+                        engine_by_seat,
+                        dice.expected_next_roll_seat,
+                        reported_completion,
+                    )
                     opening_consumed = any(entry.get("prompt_type") == "opening" for entry in consumed)
-                    if score_changed != reported_completion:
-                        raise MatchExecutionError("GNU completed-game output/state transition is missing or misparsed")
                     if score_changed:
                         if max(next_score) >= 7:
                             if opening_consumed:

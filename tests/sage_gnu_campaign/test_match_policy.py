@@ -16,6 +16,7 @@ from runner.sage_gnu_campaign.match import (
     PairExecutor,
     _board_environment,
     _raise_on_gnu_error,
+    _validate_command_transition,
     _validate_native_outputs,
     _validate_opening_transition,
     _recommended_checker_notation,
@@ -126,6 +127,7 @@ class FakeBoard:
         self.transcript: list[dict[str, str]] = []
         self.board_index = 0
         self.move_count = 0
+        self.roll_count = 0
         FakeBoard.last = self
 
     def send(self, command: str, timeout_seconds: float = 60.0) -> str:
@@ -138,11 +140,13 @@ class FakeBoard:
             ])
             self.dice.expected_next_roll_seat = "X"
         if command == "roll":
+            self.roll_count += 1
             seat = self.dice.expected_next_roll_seat or "X"
             self.dice.consumption.append(
                 {"prompt_type": "checker", "game_number": self.dice.current_game_number, "physical_seat": seat, "engine": "gnu" if seat == "X" else "sage", "die1": 3, "die2": 1}
             )
-        if command == "13/8":
+            self.dice.expected_next_roll_seat = "X" if seat == "O" else "O"
+        if command in {"1/off", "13/8"}:
             self.move_count += 1
             if self.move_count == 1:
                 self.dice.current_game_number = 2
@@ -153,7 +157,12 @@ class FakeBoard:
                     {"prompt_type": "opening", "game_number": 2, "roll_index": 2, "physical_seat": "X", "engine": "gnu", "die1": 4, "die2": None},
                 ])
                 self.dice.expected_next_roll_seat = "O"
-                return "sage wins 1 point"
+                return "sage wins 6 points"
+        if command == "take":
+            self.dice.consumption.append(
+                {"prompt_type": "checker", "game_number": 2, "physical_seat": "X", "engine": "gnu", "die1": 2, "die2": 2}
+            )
+            self.dice.expected_next_roll_seat = "O"
         if command == "show board":
             self.board_index += 1
             return f"Position ID: P{self.board_index}\nMatch ID: M{self.board_index}\n"
@@ -163,37 +172,131 @@ class FakeBoard:
         if command.startswith("export match text "):
             path = Path(command.removeprefix("export match text "))
             path.write_text("7 point match\n\n Game 1\n sage_seat_O : 0  gnu_seat_X : 0\n", encoding="utf-8")
-        if command == "accept":
-            return "sage wins 6 points"
+        if command == "pass":
+            return "sage wins 2 points"
         return "ok"
 
     def close(self) -> None:
         pass
 
 
-def position(score: int, player: str, pending: str, dice: tuple[int, int] | None) -> object:
+def fake_board_state(
+    player_0: dict[int, int] | None = None,
+    player_1: dict[int, int] | None = None,
+    *,
+    bar_0: int = 0,
+    bar_1: int = 0,
+    off_0: int = 0,
+    off_1: int = 0,
+) -> object:
+    def points(values: dict[int, int] | None) -> tuple[int, ...]:
+        result = [0] * 24
+        for point_number, count in (values or {}).items():
+            result[point_number - 1] = count
+        return tuple(result)
+
     return SimpleNamespace(
-        score=SimpleNamespace(player_0=score, player_1=0),
-        state=SimpleNamespace(decision_player=player, on_roll=player, dice=dice),
-        cube=SimpleNamespace(pending_action=SimpleNamespace(type=pending)),
+        checker_count=SimpleNamespace(player_0=15, player_1=15),
+        player_0=SimpleNamespace(points=points(player_0), bar=bar_0, off=off_0),
+        player_1=SimpleNamespace(points=points(player_1), bar=bar_1, off=off_1),
+    )
+
+
+START = fake_board_state(
+    {24: 2, 13: 5, 8: 3, 6: 5},
+    {24: 2, 13: 5, 8: 3, 6: 5},
+)
+
+
+def position(
+    score: int,
+    player: str,
+    pending: str,
+    dice: tuple[int, int] | None,
+    *,
+    board: object = START,
+    player_1_score: int = 0,
+    on_roll: str | None = None,
+    offerer: str | None = None,
+    responder: str | None = None,
+    offered_cube_value: int | None = None,
+    resignation_multiplier: int | None = None,
+    cube_value: int = 1,
+    cube_owner: str = "center",
+    game_state: str = "playing",
+) -> object:
+    return SimpleNamespace(
+        board=board,
+        score=SimpleNamespace(player_0=score, player_1=player_1_score, match_length=7),
+        state=SimpleNamespace(
+            game_state=game_state,
+            decision_player=player,
+            on_roll=on_roll if on_roll is not None else player,
+            dice=dice,
+        ),
+        cube=SimpleNamespace(
+            value=cube_value,
+            owner=cube_owner,
+            pending_action=SimpleNamespace(
+                type=pending,
+                offerer=offerer,
+                responder=responder,
+                offered_cube_value=offered_cube_value,
+                resignation_multiplier=resignation_multiplier,
+            ),
+        ),
     )
 
 
 class FakeEngineKit:
     def __init__(self) -> None:
         self.gnu_runtime = SimpleNamespace(executable=Path("/fake/gnubg"), environment=lambda: {})
-        self.positions = iter(
-            [
-                position(0, "player_0", "none", (3, 1)),
-                position(1, "player_1", "none", (4, 1)),
-                position(1, "player_0", "none", None),
-                position(1, "player_0", "none", (3, 1)),
-                position(1, "player_1", "double", None),
-                position(1, "player_0", "resignation", None),
-                position(7, "player_0", "none", None),
-            ]
+        first_game = fake_board_state({1: 1}, {24: 14}, bar_1=1, off_0=14)
+        x_moved = fake_board_state(
+            {24: 2, 13: 5, 8: 3, 6: 5},
+            {24: 2, 13: 4, 8: 4, 6: 5},
         )
+        both_moved = fake_board_state(
+            {24: 2, 13: 4, 8: 4, 6: 5},
+            {24: 2, 13: 4, 8: 4, 6: 5},
+        )
+        x_moved_again = fake_board_state(
+            {24: 2, 13: 4, 8: 4, 6: 5},
+            {24: 2, 13: 3, 8: 5, 6: 5},
+        )
+        self.position_values = [
+                position(0, "player_0", "none", (3, 1), board=first_game, cube_value=2),
+                position(6, "player_1", "none", (4, 1)),
+                position(6, "player_0", "none", None, board=x_moved),
+                position(6, "player_0", "none", (3, 1), board=x_moved),
+                position(6, "player_1", "none", None, board=both_moved),
+                position(
+                    6, "player_0", "double", None, board=both_moved,
+                    on_roll="player_1", offerer="player_1", responder="player_0",
+                    offered_cube_value=2,
+                ),
+                position(
+                    6, "player_1", "none", (2, 2), board=both_moved,
+                    cube_value=2, cube_owner="player_0",
+                ),
+                position(
+                    6, "player_0", "none", None, board=x_moved_again,
+                    cube_value=2, cube_owner="player_0",
+                ),
+                position(
+                    6, "player_1", "double", None, board=x_moved_again,
+                    on_roll="player_0", offerer="player_0", responder="player_1",
+                    offered_cube_value=4, cube_value=2, cube_owner="player_0",
+                ),
+                position(
+                    8, None, "none", None, board=x_moved_again,
+                    on_roll="player_0", cube_value=2, cube_owner="player_0",
+                    game_state="game_over",
+                ),
+        ]
+        self.positions = iter(self.position_values)
         self.analysis_calls: list[tuple[str, str]] = []
+        self.checker_commands = iter(["1/off", "13/8", "13/8", "13/8"])
 
     def position_from_gnuid(self, gnuid: str) -> object:
         assert gnuid.startswith("P")
@@ -213,15 +316,23 @@ class FakeEngineKit:
         del gnuid, dice, timeout_seconds
         self.analysis_calls.append((engine, decision_type))
         if decision_type == "checker":
+            notation = next(self.checker_commands)
             return {
                 "checker_decision": {
                     "recommended_move_id": "m1",
-                    "candidates": [{"move_id": "m1", "notation": "13/8"}],
+                    "candidates": [{"move_id": "m1", "notation": notation}],
                 }
             }
-        if len([call for call in self.analysis_calls if call[1] == "cube"]) == 1:
+        cube_call = len([call for call in self.analysis_calls if call[1] == "cube"])
+        if cube_call == 1:
             return {"cube_decision": cube_decision(0.2, 0.8, "no-double")}
-        return {"cube_decision": cube_decision(0.2, 0.8, "no-double")}
+        if cube_call == 2:
+            return {"cube_decision": cube_decision(0.2, 0.8, "double-take")}
+        if cube_call == 3:
+            return {"cube_decision": cube_decision(0.2, 0.8)}
+        if cube_call == 4:
+            return {"cube_decision": cube_decision(0.2, 0.8, "double-take")}
+        return {"cube_decision": cube_decision(0.8, 0.2)}
 
     def analyze_raw(self, engine, decision_type, gnuid, dice, timeout_seconds):
         return ReturnedAnalysis(
@@ -256,26 +367,163 @@ def test_run_match_simulates_all_normal_policy_paths_without_board_evaluation(
         ("sage", "cube"),
         ("sage", "checker"),
         ("gnu", "cube"),
+        ("sage", "cube"),
+        ("gnu", "checker"),
+        ("sage", "cube"),
+        ("gnu", "cube"),
     ]
     assert FakeBoard.last is not None
-    assert [command for command in FakeBoard.last.commands if command in {"roll", "double", "take", "pass", "13/8", "accept"}] == [
-        "13/8",
+    assert [command for command in FakeBoard.last.commands if command in {"roll", "double", "take", "pass", "1/off", "13/8"}] == [
+        "1/off",
         "13/8",
         "roll",
         "13/8",
+        "double",
         "take",
-        "accept",
+        "13/8",
+        "double",
+        "pass",
     ]
     assert not any(
         command == "hint" or command.startswith("hint ") or command == "show evaluation"
         for command in FakeBoard.last.commands
     )
-    records = [json.loads(line) for line in (tmp_path / "match-A/decisions.jsonl").read_text().splitlines()]
-    resignation = next(record for record in records if record["command"] == "accept")
-    assert resignation["engine_kit_result"] == {
-        "status": "board-rule",
-        "action": "accept-resignation",
-    }
+
+
+@pytest.mark.parametrize(
+    "case,index",
+    [
+        ("checker-pending-double", 2),
+        ("checker-board-unchanged", 2),
+        ("incorrect-next-player-on-roll", 2),
+        ("wrong-cube-after-double", 5),
+        ("take-followed-by-resignation", 6),
+        ("wrong-cube-after-take", 6),
+        ("wrong-resulting-board-dice", 6),
+        ("wrong-cube-after-pass", 9),
+    ],
+)
+def test_changed_gnuid_with_wrong_command_specific_state_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    index: int,
+) -> None:
+    """Every fake show-board response changes ID; semantic corruption must still fail."""
+    import runner.sage_gnu_campaign.match as match_module
+
+    engine_kit = FakeEngineKit()
+    changed = engine_kit.position_values[index]
+    if case == "checker-pending-double":
+        changed.cube.pending_action = SimpleNamespace(
+            type="double", offerer="player_1", responder="player_0",
+            offered_cube_value=2, resignation_multiplier=None,
+        )
+    elif case == "checker-board-unchanged":
+        changed.board = START
+    elif case == "incorrect-next-player-on-roll":
+        changed.state.on_roll = "player_1"
+    elif case == "wrong-cube-after-double":
+        changed.cube.value = 2
+    elif case == "take-followed-by-resignation":
+        changed.cube.pending_action = SimpleNamespace(
+            type="resignation", offerer="player_0", responder="player_1",
+            offered_cube_value=None, resignation_multiplier=1,
+        )
+    elif case == "wrong-cube-after-take":
+        changed.cube.owner = "player_1"
+    elif case == "wrong-resulting-board-dice":
+        changed.state.dice = (2, 3)
+    elif case == "wrong-cube-after-pass":
+        changed.cube.value = 4
+
+    monkeypatch.setattr(match_module, "SeatDiceController", FakeDice)
+    monkeypatch.setattr(match_module, "GnuBoardProcess", FakeBoard)
+    with pytest.raises(MatchExecutionError):
+        PairExecutor(load_campaign_config(CONFIG), engine_kit)._run_match(
+            pair_identity(load_campaign_config(CONFIG), 1), "A", tmp_path / case
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("physical_seat", "O"),
+        ("engine", "sage"),
+    ],
+    ids=["correct-dice-wrong-physical-seat", "correct-dice-wrong-engine"],
+)
+def test_changed_gnuid_with_next_dice_bound_to_wrong_seat_or_engine_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+) -> None:
+    import runner.sage_gnu_campaign.match as match_module
+
+    class WrongTakeDiceBoard(FakeBoard):
+        def send(self, command: str, timeout_seconds: float = 60.0) -> str:
+            output = super().send(command, timeout_seconds)
+            if command == "take":
+                self.dice.consumption[-1][field] = value
+            return output
+
+    monkeypatch.setattr(match_module, "SeatDiceController", FakeDice)
+    monkeypatch.setattr(match_module, "GnuBoardProcess", WrongTakeDiceBoard)
+    with pytest.raises(MatchExecutionError, match="wrong game, physical seat, or engine"):
+        PairExecutor(load_campaign_config(CONFIG), FakeEngineKit())._run_match(
+            pair_identity(load_campaign_config(CONFIG), 1), "A", tmp_path / field
+        )
+
+
+def test_resignation_accept_requires_exact_score_cube_action_and_turn_state() -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before = position(
+        4, "player_0", "resignation", None,
+        on_roll="player_1", offerer="player_1", responder="player_0",
+        resignation_multiplier=2, cube_value=2,
+    )
+    after = position(
+        8, None, "none", None,
+        on_roll="player_1", cube_value=2, game_state="resigned",
+    )
+    _validate_command_transition(
+        "accept", before, after, [], 1, "O", "sage", mapping, "X", True
+    )
+
+    after.cube.pending_action = SimpleNamespace(
+        type="resignation", offerer="player_1", responder="player_0",
+        offered_cube_value=None, resignation_multiplier=2,
+    )
+    with pytest.raises(MatchExecutionError, match="cube or turn ownership"):
+        _validate_command_transition(
+            "accept", before, after, [], 1, "O", "sage", mapping, "X", True
+        )
+
+
+def test_checker_move_reconciles_an_automatically_consumed_next_roll_exactly() -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before = position(
+        0, "player_0", "none", (5, 1),
+        board=fake_board_state({13: 1}, {24: 1}, off_0=14, off_1=14),
+    )
+    after = position(
+        0, "player_1", "none", (4, 2),
+        board=fake_board_state({8: 1}, {24: 1}, off_0=14, off_1=14),
+    )
+    consumed = [{
+        "prompt_type": "checker", "game_number": 1, "physical_seat": "X",
+        "engine": "gnu", "die1": 4, "die2": 2,
+    }]
+    _validate_command_transition(
+        "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", False
+    )
+
+    after.state.dice = (2, 4)
+    with pytest.raises(MatchExecutionError, match="wrong board, cube, action, dice, or turn"):
+        _validate_command_transition(
+            "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", False
+        )
 
 
 def test_malformed_returned_result_is_persisted_and_cleanup_cannot_mask_policy_error(

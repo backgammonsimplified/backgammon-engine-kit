@@ -12,6 +12,7 @@ from runner.sage_gnu_campaign.config import load_campaign_config
 from runner.sage_gnu_campaign.engine_kit import (
     EngineKitMismatch,
     EngineKitSession,
+    ReturnedAnalysis,
     analysis_result_forensics,
     validate_actual_depth_evidence,
 )
@@ -202,3 +203,86 @@ def test_forensic_capture_retains_raw_source_when_result_serialization_fails() -
     assert record["serialization_error_type"] == "ValueError"
     assert record["serialization_error_message"] == "serialization failed"
     assert record["raw_source"]["inline"] == "unserialized raw adapter response"
+
+
+class UnsupportedAdapterResult:
+    def __init__(self) -> None:
+        self.raw_source = RawSource.from_output("unsupported-object raw adapter response")
+
+    def __repr__(self) -> str:
+        return "<UnsupportedAdapterResult safe-marker>"
+
+
+@pytest.mark.parametrize(
+    "returned_value",
+    [
+        None,
+        "malformed string result",
+        123,
+        1.25,
+        True,
+        ["malformed", 7, False],
+        {"status": "broken", "raw_source": {"inline": "mapping raw evidence"}},
+        UnsupportedAdapterResult(),
+    ],
+    ids=["none", "string", "integer", "float", "boolean", "list", "mapping", "custom-object"],
+)
+def test_primitive_malformed_results_preserve_primary_contract_failure_and_evidence(
+    tmp_path: Path, returned_value: object
+) -> None:
+    class PrimaryContractFailure(RuntimeError):
+        pass
+
+    primary = PrimaryContractFailure(
+        f"primary validation rejected {type(returned_value).__name__}"
+    )
+
+    class MalformedResultSession:
+        def analyze_raw(self, *_: object) -> ReturnedAnalysis:
+            return ReturnedAnalysis(request=object(), result=returned_value)
+
+        def validate_analysis(self, _: ReturnedAnalysis) -> dict[str, object]:
+            raise primary
+
+    config = load_campaign_config(CONFIG)
+    match_root = tmp_path / "match-A"
+    match_root.mkdir()
+    with pytest.raises(PrimaryContractFailure) as caught:
+        PairExecutor(config, MalformedResultSession())._analyze_with_forensics(  # type: ignore[arg-type]
+            pair_identity(config, 1),
+            "A",
+            match_root,
+            1,
+            "O",
+            "sage",
+            "checker",
+            "position:match",
+            (3, 1),
+        )
+    assert caught.value is primary
+
+    journal = json.loads(
+        (match_root / "analysis_results.jsonl").read_text(encoding="utf-8")
+    )["returned_result"]
+    failure = json.loads(
+        (match_root / "analysis_failure.json").read_text(encoding="utf-8")
+    )
+    assert failure["exception_type"] == "PrimaryContractFailure"
+    assert failure["exception_message"] == str(primary)
+    assert failure["returned_result"] == journal
+
+    if isinstance(returned_value, dict):
+        assert journal["status"] == "broken"
+        assert journal["raw_source"]["inline"] == "mapping raw evidence"
+    else:
+        assert journal["analysis_result_type"] == type(returned_value).__name__
+        if isinstance(returned_value, UnsupportedAdapterResult):
+            assert journal["returned_value"] == {
+                "value_type": "UnsupportedAdapterResult",
+                "representation": "<UnsupportedAdapterResult safe-marker>",
+            }
+            assert journal["raw_source"]["inline"] == (
+                "unsupported-object raw adapter response"
+            )
+        else:
+            assert journal["returned_value"] == returned_value

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,8 +26,12 @@ class ReturnedAnalysis:
 
 def _forensic_value(value: Any, seen: set[int] | None = None) -> Any:
     """Return a JSON-safe snapshot without trusting Engine Kit serialization."""
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, (str, bool, int)):
         return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        return {"value_type": "float", "representation": repr(value)}
     if seen is None:
         seen = set()
     identity = id(value)
@@ -35,36 +40,80 @@ def _forensic_value(value: Any, seen: set[int] | None = None) -> Any:
     seen.add(identity)
     try:
         if isinstance(value, Mapping):
-            return {str(key): _forensic_value(item, seen) for key, item in value.items()}
+            try:
+                return {
+                    str(key): _forensic_value(item, seen)
+                    for key, item in value.items()
+                }
+            except BaseException as exc:
+                return {
+                    "value_type": type(value).__name__,
+                    "representation": _safe_representation(value),
+                    "forensic_error_type": type(exc).__name__,
+                    "forensic_error_message": _safe_exception_message(exc),
+                }
         if isinstance(value, (list, tuple)):
-            return [_forensic_value(item, seen) for item in value]
-        try:
-            return {"representation": repr(value)}
-        except BaseException as exc:
-            return {
-                "representation": "<unrepresentable value>",
-                "representation_error_type": type(exc).__name__,
-                "representation_error_message": str(exc),
-            }
+            try:
+                return [_forensic_value(item, seen) for item in value]
+            except BaseException as exc:
+                return {
+                    "value_type": type(value).__name__,
+                    "representation": _safe_representation(value),
+                    "forensic_error_type": type(exc).__name__,
+                    "forensic_error_message": _safe_exception_message(exc),
+                }
+        return {
+            "value_type": type(value).__name__,
+            "representation": _safe_representation(value),
+        }
     finally:
         seen.remove(identity)
 
 
+def _safe_representation(value: Any) -> str:
+    try:
+        return repr(value)
+    except BaseException:
+        return "<unrepresentable value>"
+
+
+def _safe_exception_message(exc: BaseException) -> str:
+    try:
+        return str(exc)
+    except BaseException:
+        return "<unprintable exception>"
+
+
 def analysis_result_forensics(result: Any) -> dict[str, Any]:
     """Capture a returned result and raw source without allowing serialization to hide either."""
-    raw_source = result.get("raw_source") if isinstance(result, Mapping) else getattr(result, "raw_source", None)
+    raw_source_error: BaseException | None = None
+    try:
+        raw_source = (
+            result.get("raw_source")
+            if isinstance(result, Mapping)
+            else getattr(result, "raw_source", None)
+        )
+    except BaseException as exc:
+        raw_source = None
+        raw_source_error = exc
     try:
         serialized = result if isinstance(result, Mapping) else result.to_dict()
     except BaseException as exc:
+        safe_result = _forensic_value(result)
         record: dict[str, Any] = {
             "analysis_result_type": type(result).__name__,
-            "representation": _forensic_value(result)["representation"],
+            "returned_value": safe_result,
             "serialization_error_type": type(exc).__name__,
-            "serialization_error_message": str(exc),
+            "serialization_error_message": _safe_exception_message(exc),
         }
     else:
         safe = _forensic_value(serialized)
         record = safe if isinstance(safe, dict) else {"serialized_result": safe}
+    if raw_source_error is not None:
+        record["raw_source_extraction_error"] = {
+            "error_type": type(raw_source_error).__name__,
+            "error_message": _safe_exception_message(raw_source_error),
+        }
     if raw_source is not None:
         try:
             serialized_raw_source = raw_source if isinstance(raw_source, Mapping) else raw_source.to_dict()
@@ -73,7 +122,7 @@ def analysis_result_forensics(result: Any) -> dict[str, Any]:
                 "raw_source_type": type(raw_source).__name__,
                 "value": _forensic_value(raw_source),
                 "serialization_error_type": type(exc).__name__,
-                "serialization_error_message": str(exc),
+                "serialization_error_message": _safe_exception_message(exc),
             }
         else:
             record["raw_source"] = _forensic_value(serialized_raw_source)

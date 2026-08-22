@@ -60,6 +60,43 @@ def _create_empty_file_durable(path: Path) -> None:
     fsync_directory(path.parent)
 
 
+def _durably_create_directory_hierarchy(anchor: Path, target: Path) -> None:
+    """Create each directory below an already durable anchor, leaf before parent."""
+    durable_anchor = Path(anchor).resolve(strict=True)
+    requested_target = Path(target).resolve(strict=False)
+    if not durable_anchor.is_dir() or not requested_target.is_relative_to(durable_anchor):
+        raise MatchExecutionError("journal hierarchy is not below its durable directory anchor")
+    current = durable_anchor
+    for component in requested_target.relative_to(durable_anchor).parts:
+        candidate = current / component
+        if candidate.exists():
+            if candidate.is_symlink() or not candidate.is_dir():
+                raise MatchExecutionError(f"journal hierarchy conflicts with non-directory: {candidate}")
+        else:
+            candidate.mkdir()
+            fsync_directory(candidate)
+            fsync_directory(current)
+        current = candidate
+
+
+def _durably_link_existing_directory_hierarchy(anchor: Path, target: Path) -> None:
+    """Flush an existing leaf-to-anchor chain so every directory entry is linked."""
+    durable_anchor = Path(anchor).resolve(strict=True)
+    requested_target = Path(target).resolve(strict=True)
+    if not durable_anchor.is_dir() or not requested_target.is_relative_to(durable_anchor):
+        raise MatchExecutionError("existing journal hierarchy is not below its durable anchor")
+    relative = requested_target.relative_to(durable_anchor)
+    directories = [
+        durable_anchor.joinpath(*relative.parts[:index])
+        for index in range(1, len(relative.parts) + 1)
+    ]
+    if any(path.is_symlink() or not path.is_dir() for path in directories):
+        raise MatchExecutionError("existing journal hierarchy contains a non-directory component")
+    for directory in reversed(directories):
+        fsync_directory(directory)
+    fsync_directory(durable_anchor)
+
+
 def _validate_native_outputs(
     sgf_path: Path,
     text_path: Path,
@@ -765,11 +802,18 @@ class PairExecutor:
         self.engine_kit = engine_kit
 
     def run(self, identity: PairIdentity, workspace: Path) -> Path:
-        output = Path(workspace) / "pair-output"
-        output.mkdir(parents=True, exist_ok=False)
+        attempt_workspace = Path(workspace).resolve(strict=True)
+        if not attempt_workspace.is_dir() or len(attempt_workspace.parents) < 2:
+            raise MatchExecutionError("pair workspace is not a durable directory anchor")
+        durable_anchor = attempt_workspace.parents[1]
+        _durably_link_existing_directory_hierarchy(durable_anchor, attempt_workspace)
+        output = attempt_workspace / "pair-output"
+        matches_root = output / "matches"
+        for side in ("A", "B"):
+            _durably_create_directory_hierarchy(attempt_workspace, matches_root / side)
         matches = []
         for side in ("A", "B"):
-            matches.append(self._run_match(identity, side, output / "matches" / side))
+            matches.append(self._run_match(identity, side, matches_root / side, attempt_workspace))
         write_json(
             output / "execution_result.json",
             {
@@ -930,8 +974,22 @@ class PairExecutor:
             raise
         return validated_result, request_record
 
-    def _run_match(self, identity: PairIdentity, side: str, match_root: Path) -> dict[str, Any]:
-        match_root.mkdir(parents=True, exist_ok=False)
+    def _run_match(
+        self,
+        identity: PairIdentity,
+        side: str,
+        match_root: Path,
+        durable_anchor: Path | None = None,
+    ) -> dict[str, Any]:
+        match_root = Path(match_root).resolve(strict=False)
+        anchor = (
+            Path(durable_anchor).resolve(strict=True)
+            if durable_anchor is not None
+            else match_root.parent
+        )
+        _durably_create_directory_hierarchy(anchor, match_root)
+        if any(match_root.iterdir()):
+            raise MatchExecutionError(f"match workspace is not empty: {match_root}")
         mapping = self.config.data["match"]["members"][side]
         engine_by_seat = {
             mapping["sage_physical_seat"]: "sage",

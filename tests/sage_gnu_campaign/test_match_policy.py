@@ -572,20 +572,46 @@ def test_analysis_journal_paths_are_directory_durable_before_board_start(
 ) -> None:
     import runner.sage_gnu_campaign.match as match_module
 
-    fsync_kinds: list[str] = []
+    pair_directory = tmp_path / "pair-000001"
+    workspace = pair_directory / "attempt-1"
+    workspace.mkdir(parents=True)
+    match_module.fsync_directory(tmp_path)
+    fsync_events: list[tuple[str, Path]] = []
     real_fsync = match_module.os.fsync
 
     def recording_fsync(descriptor: int) -> None:
-        fsync_kinds.append("directory" if stat.S_ISDIR(match_module.os.fstat(descriptor).st_mode) else "file")
+        kind = "directory" if stat.S_ISDIR(match_module.os.fstat(descriptor).st_mode) else "file"
+        descriptor_path = Path(match_module.os.readlink(f"/proc/self/fd/{descriptor}"))
+        fsync_events.append((kind, descriptor_path))
         real_fsync(descriptor)
 
-    match_root = tmp_path / "match-A"
+    match_root = workspace / "pair-output"
+    matches = match_root / "matches"
+    side_a = matches / "A"
+    side_b = matches / "B"
 
     class StopBeforeBoardStart:
         def __init__(self, *_: object) -> None:
-            assert (match_root / "analysis_requests.jsonl").read_bytes() == b""
-            assert (match_root / "analysis_results.jsonl").read_bytes() == b""
-            assert fsync_kinds == ["file", "directory", "file", "directory"]
+            assert (side_a / "analysis_requests.jsonl").read_bytes() == b""
+            assert (side_a / "analysis_results.jsonl").read_bytes() == b""
+            assert side_b.is_dir()
+            assert fsync_events == [
+                ("directory", workspace),
+                ("directory", pair_directory),
+                ("directory", tmp_path),
+                ("directory", match_root),
+                ("directory", workspace),
+                ("directory", matches),
+                ("directory", match_root),
+                ("directory", side_a),
+                ("directory", matches),
+                ("directory", side_b),
+                ("directory", matches),
+                ("file", side_a / "analysis_requests.jsonl"),
+                ("directory", side_a),
+                ("file", side_a / "analysis_results.jsonl"),
+                ("directory", side_a),
+            ]
             raise RuntimeError("stop before board start")
 
     monkeypatch.setattr(match_module.os, "fsync", recording_fsync)
@@ -593,7 +619,7 @@ def test_analysis_journal_paths_are_directory_durable_before_board_start(
     monkeypatch.setattr(match_module, "GnuBoardProcess", StopBeforeBoardStart)
     config = load_campaign_config(CONFIG)
     with pytest.raises(RuntimeError, match="stop before board start"):
-        PairExecutor(config, FakeEngineKit())._run_match(pair_identity(config, 1), "A", match_root)
+        PairExecutor(config, FakeEngineKit()).run(pair_identity(config, 1), workspace)
 
 
 def test_gnu_command_errors_fail_closed() -> None:

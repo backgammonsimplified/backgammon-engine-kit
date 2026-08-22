@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ from runner.sage_gnu_campaign.environment import (
     _environment_content_sha256,
     _validate_import_location,
     bootstrap_runner_environment,
+    durably_establish_runner_workspace,
     runner_venv,
     runner_workspace,
     verify_runner_environment,
@@ -96,6 +98,13 @@ def _environment_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tup
         "campaign_configuration_sha256": config.content_sha256,
         "engine_kit_source_commit": config.data["engine_kit"]["source_commit"],
         "engine_kit_release_commit": config.data["engine_kit"]["release_commit"],
+        "directory_durability": {
+            "protocol": "runtime-root-directory-fsync-v1",
+            "runtime_root": module.path_identity(runtime, "runner-runtime-root"),
+            "runner_workspace": module.path_identity(
+                workspace, "campaign-runner-workspace"
+            ),
+        },
         "engine_kit_package": {
             "distribution_name": "backgammon-engine-kit",
             "distribution_version": "0.4.0",
@@ -139,6 +148,126 @@ def test_existing_matching_environment_reconciles_idempotently(tmp_path: Path, m
     assert result["status"] == "reconciled"
     assert result["runner_environment"]["freeze_sha256"]
     assert len(result["runner_environment"]["environment_manifest_sha256"]) == 64
+
+
+def test_existing_legacy_environment_records_established_durable_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, repository, runtime = _environment_fixture(tmp_path, monkeypatch)
+    manifest_path = runner_workspace(config, runtime) / "environment_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("directory_durability")
+    write_json(manifest_path, manifest)
+    result = bootstrap_runner_environment(config, repository, runtime)
+    assert result["status"] == "reconciled"
+    assert result["runner_environment"]["directory_durability"]["protocol"] == (
+        "runtime-root-directory-fsync-v1"
+    )
+
+
+def test_runner_workspace_creation_is_durably_anchored_at_runtime_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import runner.sage_gnu_campaign.environment as module
+
+    config = load_campaign_config(CONFIG)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    events: list[Path] = []
+    real_fsync = module.fsync_directory
+
+    def recording_fsync(path: Path) -> None:
+        events.append(Path(path))
+        real_fsync(path)
+
+    monkeypatch.setattr(module, "fsync_directory", recording_fsync)
+    workspace = durably_establish_runner_workspace(config, runtime)
+    campaign_directory = runtime / config.campaign_id
+    assert workspace == campaign_directory / "runner-workspace"
+    assert events == [
+        runtime,
+        campaign_directory,
+        runtime,
+        workspace,
+        campaign_directory,
+    ]
+
+
+def test_bootstrap_durably_creates_a_missing_operator_runtime_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import runner.sage_gnu_campaign.environment as module
+
+    config = load_campaign_config(CONFIG)
+    runtime = tmp_path / "runtime"
+    events: list[Path] = []
+    real_fsync = module.fsync_directory
+
+    def recording_fsync(path: Path) -> None:
+        events.append(Path(path))
+        real_fsync(path)
+
+    monkeypatch.setattr(module, "fsync_directory", recording_fsync)
+    workspace = durably_establish_runner_workspace(config, runtime)
+    campaign_directory = runtime / config.campaign_id
+    assert events == [
+        runtime,
+        tmp_path,
+        campaign_directory,
+        runtime,
+        workspace,
+        campaign_directory,
+    ]
+
+
+def test_new_bootstrap_continues_after_durable_workspace_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import runner.sage_gnu_campaign.environment as module
+
+    config = load_campaign_config(CONFIG)
+    repository = tmp_path / "repository"
+    runtime = tmp_path / "runtime"
+    authority_lock = tmp_path / "authority.lock"
+    authority_lock.write_bytes(b"locked\n")
+    wheel_bytes = b"public wheel\n"
+    config.data["engine_kit"]["production_dependency_lock"]["sha256"] = sha256_file(authority_lock)
+    config.data["engine_kit"]["release"]["wheel_sha256"] = hashlib.sha256(wheel_bytes).hexdigest()
+
+    class FakeEnvBuilder:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def create(self, root: Path) -> None:
+            python = Path(root) / "bin/python"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"python\n")
+
+    observed = {
+        "distribution_name": "backgammon-engine-kit",
+        "distribution_version": "0.4.0",
+        "record_sha256": "r" * 64,
+        "executable": "python",
+    }
+    monkeypatch.setattr(module, "_dependency_lock", lambda *_: authority_lock)
+    monkeypatch.setattr(module, "_download_release_wheel", lambda _: wheel_bytes)
+    monkeypatch.setattr(module.venv, "EnvBuilder", FakeEnvBuilder)
+    monkeypatch.setattr(module, "_run", lambda *_args, **_kwargs: SimpleNamespace(stdout="Python 3.11\n", stderr=""))
+    monkeypatch.setattr(module, "_freeze", lambda _: b"frozen\n")
+    monkeypatch.setattr(module, "_probe_subprocess", lambda _: observed)
+    monkeypatch.setattr(module, "_validate_import_location", lambda *_: None)
+
+    def verify_after_creation(*_: object, **__: object) -> dict[str, object]:
+        manifest = runner_workspace(config, runtime) / "environment_manifest.json"
+        assert manifest.is_file()
+        return json.loads(manifest.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(module, "verify_runner_environment", verify_after_creation)
+    result = bootstrap_runner_environment(config, repository, runtime)
+    assert result["status"] == "created"
+    assert result["runner_environment"]["directory_durability"]["protocol"] == (
+        "runtime-root-directory-fsync-v1"
+    )
 
 
 def test_conflicting_existing_runner_workspace_is_preserved_and_rejected(tmp_path: Path) -> None:

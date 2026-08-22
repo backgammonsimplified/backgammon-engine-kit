@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import CampaignConfig
-from .manifests import path_identity, sha256_file, write_bytes_atomic, write_json
+from .manifests import fsync_directory, path_identity, sha256_file, write_bytes_atomic, write_json
 
 
 ENVIRONMENT_SCHEMA = "sage-gnu-runner-environment-v2"
@@ -34,6 +34,77 @@ def runner_venv(config: CampaignConfig, runtime_root: Path) -> Path:
 
 def pair_attempt_workspace(config: CampaignConfig, runtime_root: Path, pair_id: str, attempt: int) -> Path:
     return runner_workspace(config, runtime_root) / pair_id / f"attempt-{attempt}"
+
+
+def _durably_create_directories(anchor: Path, target: Path) -> None:
+    durable_anchor = Path(anchor).resolve(strict=True)
+    requested_target = Path(target).absolute()
+    if (
+        durable_anchor.is_symlink()
+        or not durable_anchor.is_dir()
+        or not requested_target.is_relative_to(durable_anchor)
+    ):
+        raise RunnerEnvironmentError("runner workspace is not below a durable directory anchor")
+    current = durable_anchor
+    for component in requested_target.relative_to(durable_anchor).parts:
+        candidate = current / component
+        if candidate.exists():
+            if candidate.is_symlink() or not candidate.is_dir():
+                raise RunnerEnvironmentError(
+                    f"runner workspace hierarchy conflicts with non-directory: {candidate}"
+                )
+        else:
+            candidate.mkdir()
+            fsync_directory(candidate)
+            fsync_directory(current)
+        current = candidate
+
+
+def durably_establish_runner_workspace(
+    config: CampaignConfig, runtime_root: Path
+) -> Path:
+    """Durably link the production runner workspace to the operator runtime root."""
+    requested_runtime = Path(runtime_root).resolve(strict=False)
+    runtime_existed = requested_runtime.exists()
+    existing_anchor = requested_runtime
+    while not existing_anchor.exists():
+        parent = existing_anchor.parent
+        if parent == existing_anchor:
+            raise RunnerEnvironmentError("runtime root has no existing durable ancestor")
+        existing_anchor = parent
+    _durably_create_directories(existing_anchor, requested_runtime)
+    runtime = requested_runtime.resolve(strict=True)
+    if runtime_existed:
+        fsync_directory(runtime)
+    workspace = runtime / config.campaign_id / "runner-workspace"
+    workspace_existed = workspace.exists()
+    _durably_create_directories(runtime, workspace)
+    if workspace_existed:
+        campaign_directory = workspace.parent
+        if (
+            campaign_directory.is_symlink()
+            or workspace.is_symlink()
+            or not campaign_directory.is_dir()
+            or not workspace.is_dir()
+        ):
+            raise RunnerEnvironmentError("runner workspace hierarchy is not a directory chain")
+        fsync_directory(workspace)
+        fsync_directory(campaign_directory)
+        fsync_directory(runtime)
+    return workspace.resolve(strict=True)
+
+
+def _directory_durability_identity(
+    config: CampaignConfig, runtime_root: Path
+) -> dict[str, Any]:
+    runtime = Path(runtime_root).resolve()
+    return {
+        "protocol": "runtime-root-directory-fsync-v1",
+        "runtime_root": path_identity(runtime, "runner-runtime-root"),
+        "runner_workspace": path_identity(
+            runner_workspace(config, runtime), "campaign-runner-workspace"
+        ),
+    }
 
 
 def _run(command: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -172,6 +243,7 @@ def verify_runner_environment(
     runtime_root: Path,
     *,
     require_active: bool,
+    allow_legacy_missing_durability: bool = False,
 ) -> dict[str, Any]:
     workspace = runner_workspace(config, runtime_root)
     environment_root = workspace / ".venv"
@@ -192,7 +264,10 @@ def verify_runner_environment(
         "campaign_configuration_sha256": config.content_sha256,
         "engine_kit_source_commit": kit["source_commit"],
         "engine_kit_release_commit": kit["release_commit"],
+        "directory_durability": _directory_durability_identity(config, runtime_root),
     }
+    if allow_legacy_missing_durability and "directory_durability" not in manifest:
+        expected.pop("directory_durability")
     conflicts = [key for key, value in expected.items() if manifest.get(key) != value]
     if conflicts:
         raise RunnerEnvironmentError("runner environment authority mismatch: " + ", ".join(conflicts))
@@ -249,14 +324,29 @@ def verify_runner_environment(
 
 def bootstrap_runner_environment(config: CampaignConfig, repository: Path, runtime_root: Path) -> dict[str, Any]:
     """Create once or strictly reconcile the public release-backed runner environment."""
-    workspace = runner_workspace(config, runtime_root)
-    if workspace.exists():
-        manifest = verify_runner_environment(config, repository, runtime_root, require_active=False)
+    workspace_existed = runner_workspace(config, runtime_root).exists()
+    workspace = durably_establish_runner_workspace(config, runtime_root)
+    if workspace_existed:
+        manifest = verify_runner_environment(
+            config,
+            repository,
+            runtime_root,
+            require_active=False,
+            allow_legacy_missing_durability=True,
+        )
+        if "directory_durability" not in manifest:
+            manifest_path = workspace / "environment_manifest.json"
+            upgraded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            upgraded["directory_durability"] = _directory_durability_identity(
+                config, runtime_root
+            )
+            write_json(manifest_path, upgraded)
+            manifest = verify_runner_environment(
+                config, repository, runtime_root, require_active=False
+            )
         return {"status": "reconciled", "runner_environment": manifest}
 
     lock_authority = _dependency_lock(config, repository)
-    workspace.parent.mkdir(parents=True, exist_ok=True)
-    workspace.mkdir()
     environment_root = workspace / ".venv"
     wheelhouse = workspace / "wheelhouse"
     wheelhouse.mkdir()
@@ -282,6 +372,7 @@ def bootstrap_runner_environment(config: CampaignConfig, repository: Path, runti
             "campaign_configuration_sha256": config.content_sha256,
             "engine_kit_source_commit": kit["source_commit"],
             "engine_kit_release_commit": kit["release_commit"],
+            "directory_durability": _directory_durability_identity(config, runtime_root),
             "engine_kit_package": {
                 "distribution_name": observed["distribution_name"],
                 "distribution_version": observed["distribution_version"],

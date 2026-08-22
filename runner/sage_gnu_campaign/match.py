@@ -32,8 +32,10 @@ GNU_ERROR_RE = re.compile(
 )
 GAME_WIN_RE = re.compile(r"(?im)\bwins\b[^\r\n]{0,80}\bpoints?\b")
 TEXT_MATCH_RE = re.compile(r"(?im)\b(?:\d+\s+point\s+match|match\s+to\s+\d+\s+points?)\b")
-TEXT_GAME_RE = re.compile(r"(?im)^\s*game\s+\d+\b")
-TEXT_PLAYER_SCORE_RE = re.compile(r"(?im)\b(sage|gnu)_seat_([OX])\s*:\s*\d+\b")
+TEXT_GAME_RE = re.compile(r"(?im)^\s*game\s+(\d+)\b")
+TEXT_PLAYER_SCORE_RE = re.compile(
+    r"(?im)\b([A-Za-z][A-Za-z0-9_-]*)_seat_([OX])\s*:\s*\d+\b"
+)
 NO_RETURNED_RESULT = object()
 
 
@@ -119,7 +121,7 @@ def _validate_native_outputs(
         or "MI[length:7]" not in stripped_sgf
     ):
         raise MatchExecutionError("GNU saved SGF is empty or structurally invalid")
-    player_scores = TEXT_PLAYER_SCORE_RE.findall(exported)
+    game_headers = list(TEXT_GAME_RE.finditer(exported))
     expected_player_scores = sorted(
         (engine, seat) for seat, engine in expected_engine_by_seat.items()
     )
@@ -127,12 +129,18 @@ def _validate_native_outputs(
         len(exported.strip()) < 24
         or "\x00" in exported
         or TEXT_MATCH_RE.search(exported) is None
-        or TEXT_GAME_RE.search(exported) is None
+        or not game_headers
         or set(expected_engine_by_seat) != {"O", "X"}
         or set(expected_engine_by_seat.values()) != {"sage", "gnu"}
-        or sorted(player_scores) != expected_player_scores
+        or [int(header.group(1)) for header in game_headers]
+        != list(range(1, len(game_headers) + 1))
     ):
         raise MatchExecutionError("GNU exported match text is empty or structurally invalid")
+    for index, header in enumerate(game_headers):
+        block_end = game_headers[index + 1].start() if index + 1 < len(game_headers) else len(exported)
+        player_scores = TEXT_PLAYER_SCORE_RE.findall(exported[header.end():block_end])
+        if sorted(player_scores) != expected_player_scores:
+            raise MatchExecutionError("GNU exported match text is empty or structurally invalid")
 
 
 def _sgf_delimiters_are_balanced(value: str) -> bool:

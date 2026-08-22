@@ -734,7 +734,19 @@ def test_fake_board_native_outputs_reject_empty_or_truncated_files(
     [
         ({"O": "sage", "X": "gnu"}, "7 point match\n\n Game 1\n sage_seat_O : 0  gnu_seat_X : 0\n"),
         ({"O": "gnu", "X": "sage"}, "7 point match\n\n Game 1\n sage_seat_X : 0  gnu_seat_O : 0\n"),
+        (
+            {"O": "sage", "X": "gnu"},
+            "7 point match\n\n Game 1\n sage_seat_O : 0  gnu_seat_X : 0\n"
+            "moves\n Game 2\n sage_seat_O : 1  gnu_seat_X : 0\n",
+        ),
+        (
+            {"O": "gnu", "X": "sage"},
+            "7 point match\n\n Game 1\n sage_seat_X : 0  gnu_seat_O : 0\n"
+            "moves\n Game 2\n sage_seat_X : 0  gnu_seat_O : 2\n"
+            "moves\n Game 3\n sage_seat_X : 2  gnu_seat_O : 2\n",
+        ),
     ],
+    ids=["one-game-side-a", "one-game-side-b", "multi-game-side-a", "multi-game-side-b"],
 )
 def test_fake_board_native_outputs_accept_exact_side_player_mappings(
     tmp_path: Path, engine_by_seat: dict[str, str], text: str
@@ -764,5 +776,36 @@ def test_fake_board_native_outputs_reject_nonexact_side_player_mappings(
     text_path = tmp_path / "match.txt"
     sgf_path.write_text("(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7][game:0])\n", encoding="utf-8")
     text_path.write_text(f"7 point match\n\n Game 1\n {players}\n", encoding="utf-8")
+    with pytest.raises(MatchExecutionError, match="match text"):
+        _validate_native_outputs(sgf_path, text_path, {"O": "sage", "X": "gnu"})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "7 point match\nGame 1\nsage_seat_O : 0  gnu_seat_X : 0\nGame 2\nsage_seat_O : 1\n",
+        "7 point match\nGame 1\nsage_seat_O : 0  gnu_seat_X : 0\nGame 2\nsage_seat_X : 1  gnu_seat_O : 0\n",
+        "7 point match\nGame 1\nsage_seat_O : 0  gnu_seat_X : 0  other_seat_O : 0\n",
+        "7 point match\nGame 1\nsage_seat_O : 0  sage_seat_O : 0  gnu_seat_X : 0\n",
+        "7 point match\nGame 1\nsage_seat_O : 0  gnu_seat_X : 0\nGame 3\nsage_seat_O : 1  gnu_seat_X : 0\n",
+    ],
+    ids=[
+        "later-game-missing-player",
+        "later-game-cross-wired",
+        "unexpected-third-player",
+        "duplicate-player-in-game",
+        "malformed-game-sequence",
+    ],
+)
+def test_fake_board_native_outputs_reject_invalid_per_game_player_sets(
+    tmp_path: Path, text: str
+) -> None:
+    sgf_path = tmp_path / "match.sgf"
+    text_path = tmp_path / "match.txt"
+    sgf_path.write_text(
+        "(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7][game:0])\n",
+        encoding="utf-8",
+    )
+    text_path.write_text(text, encoding="utf-8")
     with pytest.raises(MatchExecutionError, match="match text"):
         _validate_native_outputs(sgf_path, text_path, {"O": "sage", "X": "gnu"})

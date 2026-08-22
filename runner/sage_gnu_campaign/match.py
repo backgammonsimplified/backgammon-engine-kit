@@ -175,6 +175,7 @@ def _validate_opening_transition(
     position: Any,
     engine_by_seat: Mapping[str, str],
     expected_next_roll_seat: str | None,
+    expected_score: tuple[int, int],
 ) -> str:
     if not consumed or len(consumed) % 2:
         raise MatchExecutionError("GNU opening prompt consumption is missing or incomplete")
@@ -206,8 +207,10 @@ def _validate_opening_transition(
         raise MatchExecutionError("GNU opening consumption lacks one final non-tied pair")
     winner = "O" if final_o["die1"] > final_x["die1"] else "X"
     loser = "X" if winner == "O" else "O"
+    winner_player = _player(winner)
     try:
         on_roll = _seat(position.state.on_roll)
+        decision_player = _seat(position.state.decision_player)
         raw_observed_dice = position.state.dice
     except (AttributeError, TypeError, ValueError) as exc:
         raise MatchExecutionError("GNU opening board state is missing or malformed") from exc
@@ -218,13 +221,28 @@ def _validate_opening_transition(
     ):
         raise MatchExecutionError("GNU opening board state is missing or malformed")
     observed_dice = tuple(raw_observed_dice)
-    expected_dice = (int(final_o["die1"]), int(final_x["die1"]))
-    if on_roll != winner:
-        raise MatchExecutionError("GNU opening winner differs from the physical seat on roll")
-    if len(observed_dice) != 2 or sorted(observed_dice) != sorted(expected_dice):
+    expected_dice = (
+        int(final_o["die1"] if winner == "O" else final_x["die1"]),
+        int(final_x["die1"] if winner == "O" else final_o["die1"]),
+    )
+    if on_roll != winner or decision_player != winner:
+        raise MatchExecutionError("GNU opening winner differs from the decision/on-roll physical seat")
+    if observed_dice != expected_dice:
         raise MatchExecutionError("GNU opening board dice differ from the consumed opening dice")
     if expected_next_roll_seat != loser:
         raise MatchExecutionError("GNU opening dice were misapplied to the physical-seat stream")
+    if (
+        set(engine_by_seat) != {"O", "X"}
+        or set(engine_by_seat.values()) != {"sage", "gnu"}
+        or engine_by_seat.get(winner) not in {"sage", "gnu"}
+        or position.state.game_state != "playing"
+        or position.state.on_roll != winner_player
+        or position.state.decision_player != winner_player
+        or not _is_starting_board(position)
+        or _score_snapshot(position) != (*expected_score, 7)
+        or _cube_snapshot(position) != (1, "center", "none", None, None, None, None)
+    ):
+        raise MatchExecutionError("GNU opening state is not the complete legal new-game state")
     return winner
 
 
@@ -1101,6 +1119,7 @@ class PairExecutor:
                 opening_position,
                 engine_by_seat,
                 dice.expected_next_roll_seat,
+                (0, 0),
             )
             with decision_path.open("w", encoding="utf-8", newline="") as evidence:
                 while True:
@@ -1217,6 +1236,7 @@ class PairExecutor:
                                 next_position,
                                 engine_by_seat,
                                 dice.expected_next_roll_seat,
+                                next_score,
                             )
                             game_number = next_game_number
                     elif opening_consumed:

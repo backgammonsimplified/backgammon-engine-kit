@@ -344,6 +344,9 @@ class FakeEngineKit:
         if not hasattr(self, "_position_cache"):
             self._position_cache = list(self.positions)
         index = int(gnuid.split(":", 1)[0].removeprefix("P")) - 1
+        if index == 0 and not hasattr(self, "_initial_opening_returned"):
+            self._initial_opening_returned = True
+            return position(0, "player_0", "none", (3, 1))
         return self._position_cache[index]
 
     def analyze(
@@ -677,34 +680,101 @@ def test_opening_transition_binds_ties_winner_and_board_state() -> None:
         {"prompt_type": "opening", "game_number": 2, "roll_index": 2, "physical_seat": "X", "engine": "gnu", "die1": 4, "die2": None},
     ]
     observed = position(1, "player_1", "none", (4, 1))
-    assert _validate_opening_transition(consumed, 2, observed, {"O": "sage", "X": "gnu"}, "O") == "X"
+    assert _validate_opening_transition(
+        consumed, 2, observed, {"O": "sage", "X": "gnu"}, "O", (1, 0)
+    ) == "X"
 
     wrong_game = [{**entry, "game_number": 3} if index == 0 else entry for index, entry in enumerate(consumed)]
     with pytest.raises(MatchExecutionError, match="wrong game/seat"):
-        _validate_opening_transition(wrong_game, 2, observed, {"O": "sage", "X": "gnu"}, "O")
+        _validate_opening_transition(
+            wrong_game, 2, observed, {"O": "sage", "X": "gnu"}, "O", (1, 0)
+        )
     tied_final = [*consumed[:-1], {**consumed[-1], "die1": 1}]
     with pytest.raises(MatchExecutionError, match="final non-tied"):
-        _validate_opening_transition(tied_final, 2, observed, {"O": "sage", "X": "gnu"}, None)
-    with pytest.raises(MatchExecutionError, match="physical seat on roll"):
         _validate_opening_transition(
-            consumed, 2, position(1, "player_0", "none", (4, 1)), {"O": "sage", "X": "gnu"}, "O"
+            tied_final, 2, observed, {"O": "sage", "X": "gnu"}, None, (1, 0)
+        )
+    with pytest.raises(MatchExecutionError, match="decision/on-roll physical seat"):
+        _validate_opening_transition(
+            consumed, 2, position(1, "player_0", "none", (4, 1)),
+            {"O": "sage", "X": "gnu"}, "O", (1, 0),
         )
     with pytest.raises(MatchExecutionError, match="board dice"):
-        _validate_opening_transition(consumed, 2, position(1, "player_1", "none", (6, 1)), {"O": "sage", "X": "gnu"}, "O")
+        _validate_opening_transition(
+            consumed, 2, position(1, "player_1", "none", (6, 1)),
+            {"O": "sage", "X": "gnu"}, "O", (1, 0),
+        )
     with pytest.raises(MatchExecutionError, match="missing or incomplete"):
-        _validate_opening_transition([], 2, observed, {"O": "sage", "X": "gnu"}, "O")
+        _validate_opening_transition(
+            [], 2, observed, {"O": "sage", "X": "gnu"}, "O", (1, 0)
+        )
     non_tied_before_final = [{**consumed[1], "die1": 3}, *consumed[2:]]
     with pytest.raises(MatchExecutionError, match="non-final non-tied"):
         _validate_opening_transition(
             [consumed[0], *non_tied_before_final], 2, observed,
-            {"O": "sage", "X": "gnu"}, "O",
+            {"O": "sage", "X": "gnu"}, "O", (1, 0),
         )
     with pytest.raises(MatchExecutionError, match="physical-seat stream"):
-        _validate_opening_transition(consumed, 2, observed, {"O": "sage", "X": "gnu"}, "X")
+        _validate_opening_transition(
+            consumed, 2, observed, {"O": "sage", "X": "gnu"}, "X", (1, 0)
+        )
     with pytest.raises(MatchExecutionError, match="state is missing or malformed"):
         _validate_opening_transition(
             consumed, 2, position(1, "player_1", "none", (4.0, 1)),
-            {"O": "sage", "X": "gnu"}, "O",
+            {"O": "sage", "X": "gnu"}, "O", (1, 0),
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "resigned-opening",
+        "wrong-decision-player",
+        "wrong-score",
+        "stale-offerer",
+        "stale-responder",
+        "stale-offered-cube",
+        "stale-resignation",
+        "wrong-cube-owner",
+        "wrong-cube-value",
+        "wrong-starting-board",
+        "pending-action",
+        "loser-decision-player",
+        "invalid-playing-state",
+    ],
+)
+def test_opening_transition_rejects_wrong_but_changed_hidden_state(case: str) -> None:
+    consumed = [
+        {"prompt_type": "opening", "game_number": 2, "roll_index": 1, "physical_seat": "O", "engine": "sage", "die1": 1, "die2": None},
+        {"prompt_type": "opening", "game_number": 2, "roll_index": 1, "physical_seat": "X", "engine": "gnu", "die1": 4, "die2": None},
+    ]
+    observed = position(1, "player_1", "none", (4, 1))
+    if case in {"resigned-opening", "invalid-playing-state"}:
+        observed.state.game_state = "resigned" if case == "resigned-opening" else "game_over"
+    elif case in {"wrong-decision-player", "loser-decision-player"}:
+        observed.state.decision_player = "player_0"
+    elif case == "wrong-score":
+        observed.score.player_0 = 2
+    elif case == "stale-offerer":
+        observed.cube.pending_action.offerer = "player_0"
+    elif case == "stale-responder":
+        observed.cube.pending_action.responder = "player_1"
+    elif case == "stale-offered-cube":
+        observed.cube.pending_action.offered_cube_value = 2
+    elif case == "stale-resignation":
+        observed.cube.pending_action.resignation_multiplier = 1
+    elif case == "wrong-cube-owner":
+        observed.cube.owner = "player_1"
+    elif case == "wrong-cube-value":
+        observed.cube.value = 2
+    elif case == "wrong-starting-board":
+        observed.board = fake_board_state({23: 1}, {24: 2})
+    elif case == "pending-action":
+        observed.cube.pending_action.type = "double"
+
+    with pytest.raises(MatchExecutionError):
+        _validate_opening_transition(
+            consumed, 2, observed, {"O": "sage", "X": "gnu"}, "O", (1, 0)
         )
 
 

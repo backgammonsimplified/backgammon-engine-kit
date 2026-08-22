@@ -17,7 +17,7 @@ from typing import Any, Mapping
 
 from .config import CampaignConfig
 from .dice import SeatDiceController
-from .engine_kit import EngineKitSession
+from .engine_kit import EngineKitSession, analysis_result_forensics
 from .identity import PairIdentity
 from .manifests import sha256_file, write_json
 
@@ -512,7 +512,7 @@ class PairExecutor:
         )
         _append_jsonl_durable(match_root / "analysis_requests.jsonl", request_record)
         try:
-            result = self.engine_kit.analyze(engine, decision_type, gnuid, dice_values, 900.0)
+            returned = self.engine_kit.analyze_raw(engine, decision_type, gnuid, dice_values, 900.0)
         except BaseException as exc:
             try:
                 self._persist_analysis_failure(match_root, request_record, exc)
@@ -522,6 +522,7 @@ class PairExecutor:
                     f"{type(persistence_exc).__name__}: {persistence_exc}"
                 )
             raise
+        result = analysis_result_forensics(returned.result)
         try:
             _append_jsonl_durable(
                 match_root / "analysis_results.jsonl",
@@ -536,7 +537,18 @@ class PairExecutor:
                     f"{type(persistence_exc).__name__}: {persistence_exc}"
                 )
             raise
-        return result, request_record
+        try:
+            validated_result = self.engine_kit.validate_analysis(returned)
+        except BaseException as exc:
+            try:
+                self._persist_analysis_failure(match_root, request_record, exc, returned_result=result)
+            except BaseException as persistence_exc:
+                exc.add_note(
+                    "analysis failure evidence persistence also failed: "
+                    f"{type(persistence_exc).__name__}: {persistence_exc}"
+                )
+            raise
+        return validated_result, request_record
 
     def _run_match(self, identity: PairIdentity, side: str, match_root: Path) -> dict[str, Any]:
         match_root.mkdir(parents=True, exist_ok=False)

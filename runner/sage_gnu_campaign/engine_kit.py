@@ -4,14 +4,80 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .config import CampaignConfig
 
 
 class EngineKitMismatch(RuntimeError):
     """Engine Kit configuration or verified runtime behavior differs from authority."""
+
+
+@dataclass(frozen=True)
+class ReturnedAnalysis:
+    """An adapter result retained together with the exact request that produced it."""
+
+    request: Any
+    result: Any
+
+
+def _forensic_value(value: Any, seen: set[int] | None = None) -> Any:
+    """Return a JSON-safe snapshot without trusting Engine Kit serialization."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if seen is None:
+        seen = set()
+    identity = id(value)
+    if identity in seen:
+        return {"representation": "<recursive value>"}
+    seen.add(identity)
+    try:
+        if isinstance(value, Mapping):
+            return {str(key): _forensic_value(item, seen) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_forensic_value(item, seen) for item in value]
+        try:
+            return {"representation": repr(value)}
+        except BaseException as exc:
+            return {
+                "representation": "<unrepresentable value>",
+                "representation_error_type": type(exc).__name__,
+                "representation_error_message": str(exc),
+            }
+    finally:
+        seen.remove(identity)
+
+
+def analysis_result_forensics(result: Any) -> dict[str, Any]:
+    """Capture a returned result and raw source without allowing serialization to hide either."""
+    raw_source = result.get("raw_source") if isinstance(result, Mapping) else getattr(result, "raw_source", None)
+    try:
+        serialized = result if isinstance(result, Mapping) else result.to_dict()
+    except BaseException as exc:
+        record: dict[str, Any] = {
+            "analysis_result_type": type(result).__name__,
+            "representation": _forensic_value(result)["representation"],
+            "serialization_error_type": type(exc).__name__,
+            "serialization_error_message": str(exc),
+        }
+    else:
+        safe = _forensic_value(serialized)
+        record = safe if isinstance(safe, dict) else {"serialized_result": safe}
+    if raw_source is not None:
+        try:
+            serialized_raw_source = raw_source if isinstance(raw_source, Mapping) else raw_source.to_dict()
+        except BaseException as exc:
+            record["raw_source"] = {
+                "raw_source_type": type(raw_source).__name__,
+                "value": _forensic_value(raw_source),
+                "serialization_error_type": type(exc).__name__,
+                "serialization_error_message": str(exc),
+            }
+        else:
+            record["raw_source"] = _forensic_value(serialized_raw_source)
+    return record
 
 
 def validate_actual_depth_evidence(
@@ -118,14 +184,14 @@ class EngineKitSession:
             },
         }
 
-    def analyze(
+    def analyze_raw(
         self,
         engine: str,
         decision_type: str,
         gnuid: str,
         dice: tuple[int, int] | None,
         timeout_seconds: float,
-    ) -> dict[str, Any]:
+    ) -> ReturnedAnalysis:
         values = self.config.data["engines"][engine]
         setting = values[f"{decision_type}_configured_target"]
         configuration = self.sage_configuration if engine == "sage" else self.gnu_configuration
@@ -139,6 +205,15 @@ class EngineKitSession:
             configuration=configuration,
         )
         result = adapter.analyze(request, timeout_seconds=timeout_seconds)
+        return ReturnedAnalysis(request=request, result=result)
+
+    def validate_analysis(self, returned: ReturnedAnalysis) -> dict[str, Any]:
+        """Validate and serialize an already captured adapter result."""
+        request = returned.request
+        result = returned.result
+        engine = request.engine
+        decision_type = request.decision_type
+        setting = request.analysis_setting
         if result.status != "complete" or not result.matches_request(request):
             failure = result.failure.message if result.failure is not None else "result/request mismatch"
             raise EngineKitMismatch(f"{engine} {decision_type} failed verification: {failure}")
@@ -164,3 +239,16 @@ class EngineKitSession:
             "candidate_actual_plies": candidate_actuals,
         }
         return record
+
+    def analyze(
+        self,
+        engine: str,
+        decision_type: str,
+        gnuid: str,
+        dice: tuple[int, int] | None,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        """Compatibility entry point for callers that do not need two-phase capture."""
+        return self.validate_analysis(
+            self.analyze_raw(engine, decision_type, gnuid, dice, timeout_seconds)
+        )

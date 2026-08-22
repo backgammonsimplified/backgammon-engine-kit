@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from runner.sage_gnu_campaign.config import load_campaign_config
+from runner.sage_gnu_campaign.engine_kit import ReturnedAnalysis
 from runner.sage_gnu_campaign.identity import pair_identity
 from runner.sage_gnu_campaign.manifests import write_json
 from runner.sage_gnu_campaign.match import (
@@ -220,6 +221,16 @@ class FakeEngineKit:
         if len([call for call in self.analysis_calls if call[1] == "cube"]) == 1:
             return {"cube_decision": cube_decision(0.2, 0.8, "no-double")}
         return {"cube_decision": cube_decision(0.2, 0.8, "no-double")}
+
+    def analyze_raw(self, engine, decision_type, gnuid, dice, timeout_seconds):
+        return ReturnedAnalysis(
+            request=None,
+            result=self.analyze(engine, decision_type, gnuid, dice, timeout_seconds),
+        )
+
+    @staticmethod
+    def validate_analysis(returned):
+        return returned.result
 
 
 def test_run_match_simulates_all_normal_policy_paths_without_board_evaluation(

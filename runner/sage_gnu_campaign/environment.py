@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import importlib.metadata
 import json
+import os
 import subprocess
 import sys
 import urllib.request
@@ -52,6 +53,20 @@ def _run(command: list[str], *, cwd: Path | None = None) -> subprocess.Completed
 
 def _freeze(python: Path) -> bytes:
     return _run([str(python), "-m", "pip", "freeze", "--all"]).stdout.encode("utf-8")
+
+
+def _environment_content_sha256(environment_root: Path) -> str:
+    root = Path(environment_root).resolve()
+    entries: list[str] = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if path.suffix == ".pyc" and relative.parent.name == "__pycache__":
+            continue
+        if path.is_symlink():
+            entries.append(f"L\0{relative.as_posix()}\0{os.readlink(path)}")
+        elif path.is_file():
+            entries.append(f"F\0{relative.as_posix()}\0{sha256_file(path)}")
+    return hashlib.sha256(("\n".join(entries) + "\n").encode("utf-8")).hexdigest()
 
 
 def _distribution_identity() -> dict[str, Any]:
@@ -225,6 +240,8 @@ def verify_runner_environment(
         raise RunnerEnvironmentError("runner dependency freeze identity mismatch")
     if sha256_file(python) != manifest.get("python", {}).get("executable_sha256"):
         raise RunnerEnvironmentError("runner Python executable identity mismatch")
+    if _environment_content_sha256(environment_root) != manifest.get("environment_content_sha256"):
+        raise RunnerEnvironmentError("runner environment content inventory mismatch")
     identity = dict(manifest)
     identity["environment_manifest_sha256"] = sha256_file(manifest_path)
     return identity
@@ -286,6 +303,7 @@ def bootstrap_runner_environment(config: CampaignConfig, repository: Path, runti
             },
             "freeze_file": "requirements.freeze.txt",
             "freeze_sha256": hashlib.sha256(freeze).hexdigest(),
+            "environment_content_sha256": _environment_content_sha256(environment_root),
             "environment_path_identity": path_identity(environment_root, "campaign-runner-venv"),
         }
         write_json(workspace / "environment_manifest.json", manifest)

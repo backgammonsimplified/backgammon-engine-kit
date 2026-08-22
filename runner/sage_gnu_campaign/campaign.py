@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import traceback
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,7 +27,7 @@ from .manifests import (
     write_bytes_atomic,
     write_json,
 )
-from .match import PairExecutor
+from .match import PairExecutor, _validate_native_outputs
 from .preflight import preflight
 
 
@@ -113,6 +114,9 @@ def publish_pair(
         raise CampaignError(f"preserved publication staging directory requires review: {staging}")
     staging.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(execution_root, staging)
+    for side in ("A", "B"):
+        native = staging / "matches" / side / "native"
+        _validate_native_outputs(native / "match.sgf", native / "match.txt")
     execution_result = json.loads((staging / "execution_result.json").read_text(encoding="utf-8"))
     if execution_result.get("status") != "complete" or execution_result.get("pair_identity") != identity.to_dict():
         raise CampaignError("pair executor result does not match planned identity")
@@ -222,6 +226,134 @@ def _initialize_campaign_manifest(
     return path
 
 
+def _sanitize_failure_value(value: Any, private_roots: tuple[Path, ...]) -> Any:
+    if isinstance(value, dict):
+        return {
+            _sanitize_failure_value(str(key), private_roots): _sanitize_failure_value(item, private_roots)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_failure_value(item, private_roots) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_failure_value(item, private_roots) for item in value]
+    if isinstance(value, str):
+        rendered = value
+        indexed_roots = sorted(
+            enumerate(private_roots, 1), key=lambda item: len(str(Path(item[1]).resolve())), reverse=True
+        )
+        for index, root in indexed_roots:
+            rendered = rendered.replace(str(Path(root).resolve()), f"<PRIVATE_ROOT_{index}>")
+        home = str(Path.home().resolve())
+        rendered = rendered.replace(home, "<HOME>")
+        return rendered
+    return value
+
+
+def _persist_attempt_failure(
+    root: Path,
+    identity: PairIdentity,
+    attempt: int,
+    workspace: Path,
+    exc: BaseException,
+    private_roots: tuple[Path, ...],
+) -> dict[str, Any]:
+    destination = root / "failures" / identity.pair_id / f"attempt-{attempt}"
+    destination.mkdir(parents=True, exist_ok=False)
+    analysis_records = []
+    for path in sorted(workspace.rglob("analysis_failure.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        analysis_records.append(
+            {
+                "source": path.relative_to(workspace).as_posix(),
+                "record": _sanitize_failure_value(record, private_roots),
+            }
+        )
+    analysis_journals = []
+    for name in ("analysis_requests.jsonl", "analysis_results.jsonl"):
+        for path in sorted(workspace.rglob(name)):
+            try:
+                records = [
+                    _sanitize_failure_value(json.loads(line), private_roots)
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            except (OSError, json.JSONDecodeError):
+                continue
+            target = destination / f"{path.parent.name}-{name}"
+            payload = "".join(
+                json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+                for record in records
+            )
+            write_bytes_atomic(target, payload.encode("utf-8"))
+            analysis_journals.append(
+                {
+                    "kind": name.removesuffix(".jsonl"),
+                    "path": target.name,
+                    "sha256": sha256_file(target),
+                    "source": path.relative_to(workspace).as_posix(),
+                }
+            )
+    transcript_records = []
+    for path in sorted(workspace.rglob("board_transcript.partial.json")):
+        try:
+            transcript = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        target = destination / (path.parent.name + "-board-transcript.json")
+        write_json(target, _sanitize_failure_value(transcript, private_roots))
+        transcript_records.append(
+            {"path": target.name, "sha256": sha256_file(target), "source": path.relative_to(workspace).as_posix()}
+        )
+    raw = getattr(getattr(exc, "raw_source", None), "inline", None)
+    raw_record = None
+    if isinstance(raw, str):
+        rendered = _sanitize_failure_value(raw, private_roots)
+        raw_path = destination / "engine_raw_response.txt"
+        write_bytes_atomic(raw_path, rendered.encode("utf-8"))
+        raw_record = {"path": raw_path.name, "sha256": sha256_file(raw_path)}
+    failure = {
+        "schema_version": "sage-gnu-attempt-failure-v1",
+        "campaign_id": identity.campaign_id,
+        "pair_id": identity.pair_id,
+        "pair_index": identity.pair_index,
+        "attempt": attempt,
+        "failed_at_utc": utc_now(),
+        "exception_type": type(exc).__name__,
+        "exception_message": _sanitize_failure_value(str(exc), private_roots),
+        "traceback": _sanitize_failure_value(traceback.format_exc(), private_roots),
+        "analysis_failure_records": analysis_records,
+        "analysis_journals": analysis_journals,
+        "board_transcripts": transcript_records,
+        "raw_response": raw_record,
+    }
+    failure_path = destination / "failure.json"
+    write_json(failure_path, failure)
+    fsync_tree(destination)
+    return {
+        "path": failure_path.relative_to(root).as_posix(),
+        "sha256": sha256_file(failure_path),
+        "raw_response": raw_record,
+    }
+
+
+def _finalize_run_manifest(path: Path, manifest: dict[str, Any], state: str, stop_reason: str) -> dict[str, Any]:
+    manifest["state"] = state
+    manifest["stop_reason"] = stop_reason
+    manifest["state_transition_timestamps"].append(
+        {"from": "started", "to": state, "at_utc": utc_now(), "reason": stop_reason}
+    )
+    manifest["output_file_sha256"] = {
+        action["pair_id"]: action["marker_sha256"]
+        for action in manifest["pair_actions"]
+        if action["action"] in {"committed", "verified-skip"} and action.get("marker_sha256")
+    }
+    write_json(path, manifest)
+    return manifest
+
+
 def run_campaign(
     config: CampaignConfig,
     repository: Path,
@@ -255,10 +387,7 @@ def run_campaign(
     )
     common.update(
         {
-            "runner_workspace_identity": path_identity(
-                runner_workspace(config, runtime_root),
-                "campaign-runner-workspace",
-            ),
+            "runner_workspace_identity": path_identity(runner_workspace(config, runtime_root), "campaign-runner-workspace"),
             "artifact_root_identity": path_identity(artifact_root, "durable-artifact-root"),
             "host_runtime_identity": host_identity(),
             "launch_command": launch,
@@ -266,8 +395,9 @@ def run_campaign(
     )
     _initialize_campaign_manifest(root, config, common, runtime_root, artifact_root, launch)
     ledger = CampaignLedger(root / "campaign_ledger.json")
+    private_roots = (Path(repository), Path(runtime_root), Path(artifact_root))
     with ledger.locked():
-        ledger_data = ledger.initialize(
+        ledger.initialize(
             config,
             report["benchmarker"]["commit"],
             report["engine_kit"]["source_commit"],
@@ -282,13 +412,6 @@ def run_campaign(
             "state_transition_timestamps": [
                 {"from": None, "to": "started", "at_utc": utc_now(), "reason": "operator-authorized-run"}
             ],
-            "runner_workspace_identity": path_identity(
-                runner_workspace(config, runtime_root),
-                "campaign-runner-workspace",
-            ),
-            "artifact_root_identity": path_identity(artifact_root, "durable-artifact-root"),
-            "host_runtime_identity": host_identity(),
-            "launch_command": launch,
             "planned_pairs": [identity.to_dict() for identity in all_pair_identities(config)],
             "pair_actions": [],
             "output_file_sha256": {},
@@ -297,96 +420,128 @@ def run_campaign(
         session = EngineKitSession(config)
         executor = executor_factory(config, session)
         new_pairs = 0
-        stop_reason = "campaign-bound-reached"
         for identity in all_pair_identities(config):
             ledger_data = ledger.load()
             entry = ledger_data["pairs"][identity.pair_id]
             destination = pair_root(artifact_root, config, identity)
             if destination.exists():
                 marker_hash = verify_committed_pair(
-                    destination,
-                    config,
-                    identity,
-                    report["benchmarker"]["commit"],
-                    report["engine_kit"]["source_commit"],
+                    destination, config, identity,
+                    report["benchmarker"]["commit"], report["engine_kit"]["source_commit"],
                 )
-                if entry["state"] == "started":
+                if entry["state"] in {"started", "failed"}:
                     ledger.transition(
-                        identity.pair_id,
-                        "committed",
-                        reason="reconcile-published-pair-after-interruption",
+                        identity.pair_id, "committed",
+                        reason="reconcile-verified-published-pair",
                         committed_marker_sha256=marker_hash,
                     )
                 elif entry["state"] != "committed" or entry["committed_marker_sha256"] != marker_hash:
                     raise CampaignError("ledger conflicts with immutable committed pair")
-                run_manifest["pair_actions"].append({"pair_id": identity.pair_id, "action": "verified-skip"})
+                run_manifest["pair_actions"].append(
+                    {"pair_id": identity.pair_id, "action": "verified-skip", "marker_sha256": marker_hash}
+                )
                 continue
             if entry["state"] == "committed":
                 raise CampaignError("ledger says committed but immutable pair directory is absent")
             stop_file = root / config.data["bounds"]["stop_requested_file"]
             if stop_file.exists():
-                stop_reason = "stop-file-before-next-pair"
-                break
+                return _finalize_run_manifest(run_manifest_path, run_manifest, "complete", "stop-file-before-next-pair")
             if max_new_pairs is not None and new_pairs >= max_new_pairs:
-                stop_reason = "operator-max-new-pairs"
-                break
+                return _finalize_run_manifest(run_manifest_path, run_manifest, "complete", "operator-max-new-pairs")
             attempt = int(entry["attempt_count"]) + 1
-            resume = entry["state"] == "started"
             entry = ledger.transition(
-                identity.pair_id,
-                "started",
-                reason="resume-incomplete-pair-from-new-workspace" if resume else "start-pair-attempt",
+                identity.pair_id, "started",
+                reason="resume-incomplete-pair-from-new-workspace" if entry["state"] == "started" else "start-pair-attempt",
                 attempt=attempt,
             )
-            workspace = pair_attempt_workspace(
-                config,
-                runtime_root,
-                identity.pair_id,
-                attempt,
-            )
+            workspace = pair_attempt_workspace(config, runtime_root, identity.pair_id, attempt)
             workspace.mkdir(parents=True, exist_ok=False)
             try:
                 execution_root = executor.run(identity, workspace)
-                marker_hash = publish_pair(execution_root, artifact_root, config, identity, common, entry)
+            except KeyboardInterrupt as exc:
+                failure = _persist_attempt_failure(root, identity, attempt, workspace, exc, private_roots)
+                run_manifest["pair_actions"].append(
+                    {"pair_id": identity.pair_id, "action": "interrupted-incomplete", "attempt": attempt, "failure": failure}
+                )
+                _finalize_run_manifest(run_manifest_path, run_manifest, "interrupted", "operator-interrupt-incomplete-pair")
+                raise
+            except Exception as exc:
+                failure = _persist_attempt_failure(root, identity, attempt, workspace, exc, private_roots)
                 ledger.transition(
-                    identity.pair_id,
-                    "committed",
+                    identity.pair_id, "failed",
+                    reason=f"attempt-failed:{type(exc).__name__}", attempt=attempt,
+                )
+                run_manifest["pair_actions"].append(
+                    {
+                        "pair_id": identity.pair_id,
+                        "action": "failed",
+                        "attempt": attempt,
+                        "error_type": type(exc).__name__,
+                        "error_message": _sanitize_failure_value(str(exc), private_roots),
+                        "failure": failure,
+                    }
+                )
+                return _finalize_run_manifest(run_manifest_path, run_manifest, "failed", "pair-failure")
+            try:
+                marker_hash = publish_pair(execution_root, artifact_root, config, identity, common, entry)
+            except Exception as exc:
+                marker_hash = None
+                if destination.exists():
+                    try:
+                        marker_hash = verify_committed_pair(
+                            destination, config, identity,
+                            report["benchmarker"]["commit"], report["engine_kit"]["source_commit"],
+                        )
+                    except Exception:
+                        marker_hash = None
+                failure = _persist_attempt_failure(root, identity, attempt, workspace, exc, private_roots)
+                if marker_hash is None:
+                    ledger.transition(
+                        identity.pair_id, "failed",
+                        reason=f"publication-failed:{type(exc).__name__}", attempt=attempt,
+                    )
+                    action = "publication-failed"
+                else:
+                    action = "published-ledger-pending"
+                run_manifest["pair_actions"].append(
+                    {
+                        "pair_id": identity.pair_id,
+                        "action": action,
+                        "attempt": attempt,
+                        "marker_sha256": marker_hash,
+                        "error_type": type(exc).__name__,
+                        "error_message": _sanitize_failure_value(str(exc), private_roots),
+                        "failure": failure,
+                    }
+                )
+                return _finalize_run_manifest(run_manifest_path, run_manifest, "failed", "publication-failure")
+            try:
+                ledger.transition(
+                    identity.pair_id, "committed",
                     reason="immutable-pair-publication",
                     committed_marker_sha256=marker_hash,
                 )
-            except KeyboardInterrupt:
-                run_manifest["pair_actions"].append(
-                    {"pair_id": identity.pair_id, "action": "interrupted-incomplete", "attempt": attempt}
-                )
-                stop_reason = "operator-interrupt-incomplete-pair"
-                break
             except Exception as exc:
-                ledger.transition(identity.pair_id, "failed", reason=f"attempt-failed:{type(exc).__name__}")
+                failure = _persist_attempt_failure(root, identity, attempt, workspace, exc, private_roots)
                 run_manifest["pair_actions"].append(
-                    {"pair_id": identity.pair_id, "action": "failed", "attempt": attempt, "error_type": type(exc).__name__}
+                    {
+                        "pair_id": identity.pair_id,
+                        "action": "published-ledger-pending",
+                        "attempt": attempt,
+                        "marker_sha256": marker_hash,
+                        "error_type": type(exc).__name__,
+                        "error_message": _sanitize_failure_value(str(exc), private_roots),
+                        "failure": failure,
+                    }
                 )
-                stop_reason = "pair-failure"
-                break
+                return _finalize_run_manifest(run_manifest_path, run_manifest, "failed", "post-publication-ledger-failure")
             new_pairs += 1
             run_manifest["pair_actions"].append(
                 {"pair_id": identity.pair_id, "action": "committed", "attempt": attempt, "marker_sha256": marker_hash}
             )
             if stop_file.exists():
-                stop_reason = "stop-file-after-committed-pair"
-                break
-        run_manifest["state"] = "complete"
-        run_manifest["stop_reason"] = stop_reason
-        run_manifest["state_transition_timestamps"].append(
-            {"from": "started", "to": "complete", "at_utc": utc_now(), "reason": stop_reason}
-        )
-        run_manifest["output_file_sha256"] = {
-            action["pair_id"]: action["marker_sha256"]
-            for action in run_manifest["pair_actions"]
-            if action["action"] == "committed"
-        }
-        write_json(run_manifest_path, run_manifest)
-        return run_manifest
-
+                return _finalize_run_manifest(run_manifest_path, run_manifest, "complete", "stop-file-after-committed-pair")
+        return _finalize_run_manifest(run_manifest_path, run_manifest, "complete", "campaign-bound-reached")
 
 def campaign_status(config: CampaignConfig, artifact_root: Path) -> dict[str, Any]:
     root = campaign_root(artifact_root, config)
@@ -397,7 +552,15 @@ def campaign_status(config: CampaignConfig, artifact_root: Path) -> dict[str, An
     if data.get("campaign_configuration_sha256") != config.content_sha256:
         raise CampaignError("ledger configuration differs from committed campaign config")
     counts = {state: 0 for state in ("planned", "started", "failed", "committed")}
-    for pair in data["pairs"].values():
+    identities = {identity.pair_id: identity for identity in all_pair_identities(config)}
+    for pair_id, pair in data["pairs"].items():
+        if pair["state"] == "committed":
+            marker_hash = verify_committed_pair(
+                pair_root(artifact_root, config, identities[pair_id]),
+                config, identities[pair_id], data["benchmarker_commit"], data["engine_kit_source_commit"],
+            )
+            if marker_hash != pair.get("committed_marker_sha256"):
+                raise CampaignError("ledger committed marker hash differs from immutable pair")
         counts[pair["state"]] += 1
     return {
         "campaign_id": config.campaign_id,

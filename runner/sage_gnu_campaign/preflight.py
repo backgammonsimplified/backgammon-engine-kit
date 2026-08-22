@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
 
 from .config import CampaignConfig
@@ -12,6 +13,9 @@ from .manifests import benchmarker_git_identity, engine_kit_release_identity, pa
 
 class PreflightError(RuntimeError):
     """The operator environment is not authorized-ready for this campaign."""
+
+
+_SAFE_GNU_PATH = re.compile(r"^[/A-Za-z0-9._-]+$")
 
 
 def _overlaps(left: Path, right: Path) -> bool:
@@ -30,6 +34,8 @@ def validate_roots(
     if _overlaps(runtime_root, artifact_root):
         raise PreflightError("runtime and durable artifact roots must be separate")
     for candidate, label in ((runtime_root, "runtime"), (artifact_root, "artifact")):
+        if _SAFE_GNU_PATH.fullmatch(str(candidate)) is None:
+            raise PreflightError(f"{label} root contains GNU-command-unsafe characters")
         if _overlaps(candidate, repository):
             raise PreflightError(f"{label} root must be outside the public campaign checkout")
         lowered = {part.lower() for part in candidate.parts}

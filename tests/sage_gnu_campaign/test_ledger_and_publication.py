@@ -16,6 +16,7 @@ from runner.sage_gnu_campaign.manifests import (
     write_bytes_atomic,
     write_json,
 )
+from runner.sage_gnu_campaign.match import MatchExecutionError
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -90,8 +91,19 @@ def test_config_or_commit_mismatch_fails_closed(tmp_path: Path) -> None:
 def execution_fixture(root: Path, identity) -> None:
     (root / "matches" / "A").mkdir(parents=True)
     (root / "matches" / "B").mkdir(parents=True)
-    (root / "matches" / "A" / "decisions.jsonl").write_text("{}\n", encoding="utf-8")
-    (root / "matches" / "B" / "decisions.jsonl").write_text("{}\n", encoding="utf-8")
+    for side, sage_seat, gnu_seat in (("A", "O", "X"), ("B", "X", "O")):
+        match = root / "matches" / side
+        (match / "decisions.jsonl").write_text("{}\n", encoding="utf-8")
+        native = match / "native"
+        native.mkdir()
+        (native / "match.sgf").write_text(
+            "(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7][game:0])\n",
+            encoding="utf-8",
+        )
+        (native / "match.txt").write_text(
+            f"7 point match\n\n Game 1\n sage_seat_{sage_seat} : 0  gnu_seat_{gnu_seat} : 0\n",
+            encoding="utf-8",
+        )
     write_json(
         root / "execution_result.json",
         {
@@ -142,6 +154,28 @@ def test_committed_pair_is_verified_and_never_regenerated(tmp_path: Path) -> Non
         verify_committed_pair(committed, config, identity, "b" * 40, ENGINE_KIT_COMMIT)
 
 
+def test_publication_rejects_invalid_native_gnu_output(tmp_path: Path) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    execution_fixture(execution, identity)
+    (execution / "matches/A/native/match.sgf").write_text("", encoding="utf-8")
+    common = {
+        "benchmarker": {"commit": BENCHMARKER_COMMIT},
+        "engine_kit": {"source_commit": ENGINE_KIT_COMMIT},
+    }
+    with pytest.raises(MatchExecutionError, match="SGF"):
+        publish_pair(
+            execution,
+            tmp_path / "artifacts",
+            config,
+            identity,
+            common,
+            {"attempt_count": 1, "transitions": []},
+        )
+    assert not (tmp_path / "artifacts" / config.campaign_id / "pairs" / identity.pair_id).exists()
+
+
 def test_checksum_manifest_is_deterministic_for_immutable_inputs(tmp_path: Path) -> None:
     root = tmp_path / "immutable"
     root.mkdir()
@@ -183,3 +217,16 @@ def test_atomic_durable_writes_replace_and_fsync_file_and_directory(
     assert destination.read_text(encoding="utf-8") == '{\n  "state": "committed"\n}\n'
     assert len(observed) >= 4
     assert not list(tmp_path.glob(".durable.json.tmp-*"))
+
+
+def test_verified_failed_pair_can_reconcile_directly_to_committed(tmp_path: Path) -> None:
+    ledger, config = initialized_ledger(tmp_path)
+    identity = pair_identity(config, 1)
+    ledger.transition(identity.pair_id, "started", reason="start", attempt=1)
+    ledger.transition(identity.pair_id, "failed", reason="legacy-post-publication-failure", attempt=1)
+    committed = ledger.transition(
+        identity.pair_id, "committed", reason="reconcile-verified-published-pair",
+        committed_marker_sha256="d" * 64,
+    )
+    assert committed["state"] == "committed"
+    assert committed["attempt_count"] == 1

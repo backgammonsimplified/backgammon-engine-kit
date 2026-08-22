@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from runner.sage_gnu_campaign.config import load_campaign_config
+from runner.sage_gnu_campaign.identity import pair_identity
 from runner.sage_gnu_campaign.dice import (
     SeatDiceController,
     dice_record,
@@ -59,3 +61,24 @@ def test_a_b_namespaces_diverge_without_stream_identity_drift(tmp_path: Path) ->
     assert stream_id(match_a.seed, 1, "O") == a_o_id
     assert stream_id(match_b.seed, 1, "O") == b_o_id
     assert a_o_id != b_o_id
+
+
+def test_completed_game_opening_tie_does_not_advance_twice(tmp_path: Path) -> None:
+    repo = Path(__file__).resolve().parents[2]
+    config = load_campaign_config(repo / "experiments/sage-gnu-campaign-v1/campaign.json")
+    identity = pair_identity(config, 2)
+    source = SeatDiceController(
+        tmp_path / "A", identity.base_seed, "A",
+        config.data["dice"]["roll_count_per_game_seat"],
+        config.data["dice"]["files_per_match"],
+        {"O": "sage", "X": "gnu"},
+    )
+    source.prepare_opening(1)
+    source.expected_next_roll_seat = "X"
+    first = source.dice_for_prompt("Sage wins 1 point.\nEnter dice:")
+    assert source.current_game_number == 2
+    assert first[0] == first[1]  # frozen pair-2/A game-2 first opening attempt is a tie
+    second = source.dice_for_prompt("Sage wins 1 point.\nEnter dice:\nTie.\nEnter dice:")
+    assert source.current_game_number == 2
+    assert source.opening_attempt_index[2] == 2
+    assert len(second) == 2

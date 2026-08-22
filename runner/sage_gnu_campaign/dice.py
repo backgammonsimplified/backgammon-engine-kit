@@ -196,7 +196,10 @@ class SeatDiceController:
 
     def dice_for_prompt(self, output_before_prompt: str) -> tuple[int, int]:
         lower = output_before_prompt.lower()
-        if "wins " in lower and " point" in lower:
+        # A completed game is advanced exactly once.  After prepare_opening() the
+        # expected seat is None, so a tied opening prompt cannot re-consume the
+        # same cumulative "wins ... point" marker as another game transition.
+        if "wins " in lower and " point" in lower and self.expected_next_roll_seat is not None:
             self.prepare_opening(self.current_game_number + 1)
         if self.expected_next_roll_seat is None:
             return self.opening_dice()

@@ -50,4 +50,6 @@ A separately authorized bounded smoke pair uses:
   --authorize-real-match
 ```
 
-`STOP_AFTER_PAIR` requests a stop after the active pair is immutably published. No command in this runner performs post-match GNU analysis, corpus ingestion, Canonical writing, or Explainer work.
+`STOP_AFTER_PAIR` requests a stop after the active pair is immutably published. Pair execution/publication failures finalize the run as `failed`, return a non-zero CLI status, and retain sanitized attempt forensics under the campaign `failures/` directory. Engine-analysis failures journal the side, game, physical seat, engine, decision type, GNU ID, exception message, and immutable raw Engine Kit response when available. GNU setup/action errors and unchanged board states fail closed.
+
+No command in this runner performs post-match GNU analysis, corpus ingestion, Canonical writing, or Explainer work.

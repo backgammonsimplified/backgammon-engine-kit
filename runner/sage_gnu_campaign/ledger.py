@@ -21,6 +21,7 @@ ALLOWED_TRANSITIONS = {
     ("started", "failed"),
     ("started", "committed"),
     ("failed", "started"),
+    ("failed", "committed"),
 }
 
 

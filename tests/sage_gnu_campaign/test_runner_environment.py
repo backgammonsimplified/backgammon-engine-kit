@@ -9,6 +9,7 @@ import pytest
 from runner.sage_gnu_campaign.config import load_campaign_config
 from runner.sage_gnu_campaign.environment import (
     RunnerEnvironmentError,
+    _environment_content_sha256,
     _validate_import_location,
     bootstrap_runner_environment,
     runner_venv,
@@ -111,6 +112,7 @@ def _environment_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tup
         },
         "python": {"executable_sha256": sha256_file(python)},
         "freeze_sha256": hashlib.sha256(freeze).hexdigest(),
+        "environment_content_sha256": _environment_content_sha256(environment),
     }
     write_json(workspace / "environment_manifest.json", manifest)
     return config, repository, runtime
@@ -183,3 +185,38 @@ def test_environment_identity_fields_enter_common_manifests() -> None:
     assert common["runner_environment"] == environment
     assert common["configured_profile"]["sage_threads"] == 1
     assert common["configured_profile"]["gnu_threads"] == 1
+
+
+def test_runner_environment_content_mutation_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, repository, runtime = _environment_fixture(tmp_path, monkeypatch)
+    environment = runner_venv(config, runtime)
+    target = environment / "lib/python3.11/site-packages/backgammon_engine_kit/__init__.py"
+    target.write_text("tampered\n", encoding="utf-8")
+    with pytest.raises(RunnerEnvironmentError, match="content inventory"):
+        verify_runner_environment(config, repository, runtime, require_active=False)
+
+
+def test_unrecorded_sourceless_bytecode_outside_pycache_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, repository, runtime = _environment_fixture(tmp_path, monkeypatch)
+    environment = runner_venv(config, runtime)
+    (environment / "lib/python3.11/site-packages/unrecorded.pyc").write_bytes(b"sourceless-bytecode")
+    with pytest.raises(RunnerEnvironmentError, match="content inventory"):
+        verify_runner_environment(config, repository, runtime, require_active=False)
+
+
+def test_interpreter_cache_bytecode_under_pycache_remains_volatile(tmp_path: Path) -> None:
+    environment = tmp_path / ".venv"
+    cache = environment / "lib/python3.11/site-packages/package/__pycache__"
+    cache.mkdir(parents=True)
+    before = _environment_content_sha256(environment)
+    (cache / "module.cpython-311.pyc").write_bytes(b"volatile-cache")
+    assert _environment_content_sha256(environment) == before
+
+
+def test_gnu_native_output_roots_reject_command_unsafe_paths(tmp_path: Path) -> None:
+    config = load_campaign_config(CONFIG)
+    repository = tmp_path / "repo"
+    with pytest.raises(Exception, match="unsafe characters"):
+        validate_roots(config, repository, tmp_path / "runtime with space", tmp_path / "artifacts")

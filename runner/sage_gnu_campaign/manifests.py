@@ -113,6 +113,10 @@ def benchmarker_git_identity(repository: Path, config: CampaignConfig) -> dict[s
     expected = config.data["benchmarker"]
     if branch != expected["branch"]:
         raise ProvenanceError(f"Benchmarker branch mismatch: {branch}")
+    origin = git_output(repository, "remote", "get-url", "origin")
+    expected_origin = f"git@github.com:{expected['repository']}.git"
+    if origin != expected_origin:
+        raise ProvenanceError(f"Benchmarker origin mismatch: {origin}")
     return {
         "repository": expected["repository"],
         "branch": branch,

@@ -77,4 +77,6 @@ def main(argv: list[str] | None = None) -> int:
             max_new_pairs=args.max_new_pairs,
         )
     print(json.dumps(output, indent=2, sort_keys=True))
+    if args.command == "run" and output.get("state") == "failed":
+        return 1
     return 0

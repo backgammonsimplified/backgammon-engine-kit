@@ -141,6 +141,7 @@ def test_committed_pair_is_verified_and_never_regenerated(tmp_path: Path) -> Non
         "transitions": [{"from": "planned", "to": "started", "at_utc": "2026-08-19T00:00:00Z"}],
     }
     artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
     marker_hash = publish_pair(execution, artifact_root, config, identity, common, ledger_pair)
     committed = artifact_root / config.campaign_id / "pairs" / identity.pair_id
     assert verify_committed_pair(
@@ -164,6 +165,7 @@ def test_publication_rejects_invalid_native_gnu_output(tmp_path: Path) -> None:
         "benchmarker": {"commit": BENCHMARKER_COMMIT},
         "engine_kit": {"source_commit": ENGINE_KIT_COMMIT},
     }
+    (tmp_path / "artifacts").mkdir()
     with pytest.raises(MatchExecutionError, match="SGF"):
         publish_pair(
             execution,
@@ -174,6 +176,121 @@ def test_publication_rejects_invalid_native_gnu_output(tmp_path: Path) -> None:
             {"attempt_count": 1, "transitions": []},
         )
     assert not (tmp_path / "artifacts" / config.campaign_id / "pairs" / identity.pair_id).exists()
+
+
+def test_publication_durably_links_real_hierarchy_before_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import runner.sage_gnu_campaign.campaign as campaign_module
+
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    execution_fixture(execution, identity)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    campaign = artifact_root / config.campaign_id
+    pairs = campaign / "pairs"
+    staging = pairs / f".{identity.pair_id}.staging-attempt-1"
+    destination = pairs / identity.pair_id
+    events: list[tuple[str, Path]] = []
+    real_fsync_directory = campaign_module.fsync_directory
+    real_fsync_tree = campaign_module.fsync_tree
+    real_replace = campaign_module.os.replace
+    real_verify = campaign_module.verify_committed_pair
+
+    def recording_directory(path: Path) -> None:
+        events.append(("directory", Path(path)))
+        real_fsync_directory(path)
+
+    def recording_tree(path: Path) -> None:
+        events.append(("tree", Path(path)))
+        real_fsync_tree(path)
+
+    def recording_replace(source: Path, target: Path) -> None:
+        events.append(("replace", Path(target)))
+        real_replace(source, target)
+
+    def recording_verify(*args, **kwargs):
+        events.append(("verify", Path(args[0])))
+        return real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(campaign_module, "fsync_directory", recording_directory)
+    monkeypatch.setattr(campaign_module, "fsync_tree", recording_tree)
+    monkeypatch.setattr(campaign_module.os, "replace", recording_replace)
+    monkeypatch.setattr(campaign_module, "verify_committed_pair", recording_verify)
+    common = {
+        "benchmarker": {"commit": BENCHMARKER_COMMIT},
+        "engine_kit": {"source_commit": ENGINE_KIT_COMMIT},
+    }
+    publish_pair(
+        execution, artifact_root, config, identity, common,
+        {"attempt_count": 1, "transitions": []},
+    )
+
+    assert events[:4] == [
+        ("directory", campaign),
+        ("directory", artifact_root),
+        ("directory", pairs),
+        ("directory", campaign),
+    ]
+    first_staging_flush = events.index(("tree", staging))
+    replace = events.index(("replace", destination))
+    verify = events.index(("verify", destination))
+    assert ("directory", pairs) in events[first_staging_flush + 1:replace]
+    assert events[replace + 1] == ("directory", pairs)
+    assert verify > replace + 1
+
+
+def test_publication_final_parent_fsync_failure_is_reconcilable_not_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import runner.sage_gnu_campaign.campaign as campaign_module
+
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    execution_fixture(execution, identity)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    destination = artifact_root / config.campaign_id / "pairs" / identity.pair_id
+    real_fsync_directory = campaign_module.fsync_directory
+
+    def fail_after_final_rename(path: Path) -> None:
+        if Path(path) == destination.parent and destination.is_dir():
+            raise OSError("simulated crash-window fsync failure")
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(campaign_module, "fsync_directory", fail_after_final_rename)
+    common = {
+        "benchmarker": {"commit": BENCHMARKER_COMMIT},
+        "engine_kit": {"source_commit": ENGINE_KIT_COMMIT},
+    }
+    with pytest.raises(OSError, match="crash-window"):
+        publish_pair(
+            execution, artifact_root, config, identity, common,
+            {"attempt_count": 1, "transitions": []},
+        )
+    assert destination.is_dir()
+    assert verify_committed_pair(
+        destination, config, identity, BENCHMARKER_COMMIT, ENGINE_KIT_COMMIT
+    )
+
+
+def test_publication_requires_preestablished_artifact_root(tmp_path: Path) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    execution_fixture(execution, identity)
+    with pytest.raises(CampaignError, match="pre-established durable"):
+        publish_pair(
+            execution,
+            tmp_path / "absent-artifacts",
+            config,
+            identity,
+            {"benchmarker": {"commit": BENCHMARKER_COMMIT}, "engine_kit": {"source_commit": ENGINE_KIT_COMMIT}},
+            {"attempt_count": 1, "transitions": []},
+        )
 
 
 def test_checksum_manifest_is_deterministic_for_immutable_inputs(tmp_path: Path) -> None:

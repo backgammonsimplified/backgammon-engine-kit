@@ -46,6 +46,30 @@ def pair_root(artifact_root: Path, config: CampaignConfig, identity: PairIdentit
     return campaign_root(artifact_root, config) / "pairs" / identity.pair_id
 
 
+def _establish_publication_hierarchy(artifact_root: Path, config: CampaignConfig) -> Path:
+    """Durably link the production campaign/pairs hierarchy to its anchor."""
+    requested_anchor = Path(artifact_root)
+    if requested_anchor.is_symlink() or not requested_anchor.is_dir():
+        raise CampaignError("artifact root must be a pre-established durable directory anchor")
+    anchor = requested_anchor.resolve(strict=True)
+    current = anchor
+    for component in (config.campaign_id, "pairs"):
+        candidate = current / component
+        if candidate.is_symlink():
+            raise CampaignError(f"publication hierarchy contains a symbolic link: {candidate}")
+        if candidate.exists():
+            if not candidate.is_dir():
+                raise CampaignError(f"publication hierarchy conflicts with non-directory: {candidate}")
+        else:
+            candidate.mkdir()
+        # The child flush precedes the parent flush: first make the directory
+        # itself durable, then make its name durable in the established parent.
+        fsync_directory(candidate)
+        fsync_directory(current)
+        current = candidate
+    return current
+
+
 def _marker_authority(
     config: CampaignConfig,
     identity: PairIdentity,
@@ -106,14 +130,16 @@ def publish_pair(
     common: dict[str, Any],
     ledger_pair: dict[str, Any],
 ) -> str:
-    destination = pair_root(artifact_root, config, identity)
+    pairs = _establish_publication_hierarchy(artifact_root, config)
+    destination = pairs / identity.pair_id
     if destination.exists():
         raise CampaignError(f"refusing to overwrite existing pair output: {destination}")
     staging = destination.parent / f".{identity.pair_id}.staging-attempt-{ledger_pair['attempt_count']}"
     if staging.exists():
         raise CampaignError(f"preserved publication staging directory requires review: {staging}")
-    staging.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(execution_root, staging)
+    fsync_tree(staging)
+    fsync_directory(pairs)
     for side in ("A", "B"):
         native = staging / "matches" / side / "native"
         mapping = config.data["match"]["members"][side]
@@ -178,8 +204,9 @@ def publish_pair(
     }
     write_json(staging / "_COMMITTED.json", marker)
     fsync_tree(staging)
+    fsync_directory(pairs)
     os.replace(staging, destination)
-    fsync_directory(destination.parent)
+    fsync_directory(pairs)
     return verify_committed_pair(
         destination,
         config,
@@ -381,8 +408,8 @@ def run_campaign(
         require_clean_benchmarker=True,
         load_engine_runtime=True,
     )
-    root = campaign_root(artifact_root, config)
-    root.mkdir(parents=True, exist_ok=True)
+    pairs = _establish_publication_hierarchy(artifact_root, config)
+    root = pairs.parent
     common = common_manifest(
         config,
         report["benchmarker"],

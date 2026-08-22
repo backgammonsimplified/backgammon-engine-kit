@@ -77,6 +77,7 @@ def test_pair_failure_persists_failed_run_and_forensics(tmp_path: Path, monkeypa
     monkeypatch.setattr(campaign_module, "EngineKitSession", lambda _: object())
     runtime = tmp_path / "runtime"
     artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
     result = run_campaign(config, REPO, runtime, artifacts, ["runner", "run"], max_new_pairs=1, executor_factory=FailingExecutor)
     assert result["state"] == "failed"
     assert result["stop_reason"] == "pair-failure"
@@ -120,6 +121,7 @@ def test_verified_published_pair_reconciles_from_failed_without_executor(tmp_pat
     config = load_campaign_config(CONFIG)
     identity = pair_identity(config, 1)
     artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
     root = campaign_root(artifacts, config)
     ledger = CampaignLedger(root / "campaign_ledger.json")
     ledger.initialize(config, BENCH, KIT)

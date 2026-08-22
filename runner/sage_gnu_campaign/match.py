@@ -60,7 +60,11 @@ def _create_empty_file_durable(path: Path) -> None:
     fsync_directory(path.parent)
 
 
-def _validate_native_outputs(sgf_path: Path, text_path: Path) -> None:
+def _validate_native_outputs(
+    sgf_path: Path,
+    text_path: Path,
+    expected_engine_by_seat: Mapping[str, str],
+) -> None:
     try:
         sgf = sgf_path.read_text(encoding="utf-8-sig")
         exported = text_path.read_text(encoding="utf-8-sig")
@@ -78,14 +82,18 @@ def _validate_native_outputs(sgf_path: Path, text_path: Path) -> None:
         or "MI[length:7]" not in stripped_sgf
     ):
         raise MatchExecutionError("GNU saved SGF is empty or structurally invalid")
-    player_scores = set(TEXT_PLAYER_SCORE_RE.findall(exported))
+    player_scores = TEXT_PLAYER_SCORE_RE.findall(exported)
+    expected_player_scores = sorted(
+        (engine, seat) for seat, engine in expected_engine_by_seat.items()
+    )
     if (
         len(exported.strip()) < 24
         or "\x00" in exported
         or TEXT_MATCH_RE.search(exported) is None
         or TEXT_GAME_RE.search(exported) is None
-        or {engine for engine, _ in player_scores} != {"sage", "gnu"}
-        or {seat for _, seat in player_scores} != {"O", "X"}
+        or set(expected_engine_by_seat) != {"O", "X"}
+        or set(expected_engine_by_seat.values()) != {"sage", "gnu"}
+        or sorted(player_scores) != expected_player_scores
     ):
         raise MatchExecutionError("GNU exported match text is empty or structurally invalid")
 
@@ -738,7 +746,7 @@ class PairExecutor:
             native.mkdir()
             board.send(f"save match {native / 'match.sgf'}")
             board.send(f"export match text {native / 'match.txt'}")
-            _validate_native_outputs(native / "match.sgf", native / "match.txt")
+            _validate_native_outputs(native / "match.sgf", native / "match.txt", engine_by_seat)
             write_json(native / "board_transcript.json", board.transcript)
             completed = True
         except BaseException as exc:

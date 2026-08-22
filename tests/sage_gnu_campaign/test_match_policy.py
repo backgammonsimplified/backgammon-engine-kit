@@ -411,12 +411,43 @@ def test_fake_board_native_outputs_reject_empty_or_truncated_files(
     sgf_path.write_text(sgf, encoding="utf-8")
     text_path.write_text(text, encoding="utf-8")
     with pytest.raises(MatchExecutionError, match=error):
-        _validate_native_outputs(sgf_path, text_path)
+        _validate_native_outputs(sgf_path, text_path, {"O": "sage", "X": "gnu"})
 
 
-def test_fake_board_native_outputs_accept_minimal_real_gnu_shapes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "engine_by_seat,text",
+    [
+        ({"O": "sage", "X": "gnu"}, "7 point match\n\n Game 1\n sage_seat_O : 0  gnu_seat_X : 0\n"),
+        ({"O": "gnu", "X": "sage"}, "7 point match\n\n Game 1\n sage_seat_X : 0  gnu_seat_O : 0\n"),
+    ],
+)
+def test_fake_board_native_outputs_accept_exact_side_player_mappings(
+    tmp_path: Path, engine_by_seat: dict[str, str], text: str
+) -> None:
     sgf_path = tmp_path / "match.sgf"
     text_path = tmp_path / "match.txt"
     sgf_path.write_text("(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7][game:0])\n", encoding="utf-8")
-    text_path.write_text("7 point match\n\n Game 1\n sage_seat_O : 0  gnu_seat_X : 0\n", encoding="utf-8")
-    _validate_native_outputs(sgf_path, text_path)
+    text_path.write_text(text, encoding="utf-8")
+    _validate_native_outputs(sgf_path, text_path, engine_by_seat)
+
+
+@pytest.mark.parametrize(
+    "players",
+    [
+        "sage_seat_O : 0",
+        "sage_seat_O : 0  sage_seat_O : 0  gnu_seat_X : 0",
+        "sage_seat_O : 0  gnu_seat_X : 0  sage_seat_X : 0",
+        "sage_seat_O : 0  gnu_seat_O : 0",
+        "sage_seat_X : 0  gnu_seat_O : 0",
+    ],
+    ids=["missing", "duplicate", "extra", "cross-wired", "wrong-side"],
+)
+def test_fake_board_native_outputs_reject_nonexact_side_player_mappings(
+    tmp_path: Path, players: str
+) -> None:
+    sgf_path = tmp_path / "match.sgf"
+    text_path = tmp_path / "match.txt"
+    sgf_path.write_text("(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7][game:0])\n", encoding="utf-8")
+    text_path.write_text(f"7 point match\n\n Game 1\n {players}\n", encoding="utf-8")
+    with pytest.raises(MatchExecutionError, match="match text"):
+        _validate_native_outputs(sgf_path, text_path, {"O": "sage", "X": "gnu"})

@@ -116,7 +116,16 @@ def publish_pair(
     shutil.copytree(execution_root, staging)
     for side in ("A", "B"):
         native = staging / "matches" / side / "native"
-        _validate_native_outputs(native / "match.sgf", native / "match.txt")
+        mapping = config.data["match"]["members"][side]
+        expected_engine_by_seat = {
+            mapping["sage_physical_seat"]: "sage",
+            mapping["gnu_physical_seat"]: "gnu",
+        }
+        _validate_native_outputs(
+            native / "match.sgf",
+            native / "match.txt",
+            expected_engine_by_seat,
+        )
     execution_result = json.loads((staging / "execution_result.json").read_text(encoding="utf-8"))
     if execution_result.get("status") != "complete" or execution_result.get("pair_identity") != identity.to_dict():
         raise CampaignError("pair executor result does not match planned identity")

@@ -30,13 +30,65 @@ MANUAL_DICE = b"Enter dice:"
 GNU_ERROR_RE = re.compile(
     r"(?im)^\s*(?:error:|unknown keyword\b|unknown command\b|illegal (?:move|play)\b|invalid (?:move|command)\b|you must set\b)"
 )
-GAME_WIN_RE = re.compile(r"(?im)\bwins\b[^\r\n]{0,80}\bpoints?\b")
+TERMINAL_RESULT_RE = re.compile(
+    r"(?im)^\s*(sage|gnu)_seat_([OX]) wins a "
+    r"(single game|gammon|backgammon) and (\d+) points?\.\s*$"
+)
+TERMINAL_DROP_RE = re.compile(
+    r"(?im)^\s*(sage|gnu)_seat_([OX]) refuses the cube and gives up (\d+) points?\.\s*$"
+)
+TERMINAL_RESIGN_RE = re.compile(
+    r"(?im)^\s*(sage|gnu)_seat_([OX]) accepts and wins a "
+    r"(single game|gammon|backgammon)\.\s*$"
+)
 TEXT_MATCH_RE = re.compile(r"(?im)\b(?:\d+\s+point\s+match|match\s+to\s+\d+\s+points?)\b")
 TEXT_GAME_RE = re.compile(r"(?im)^\s*game\s+(\d+)\b")
 TEXT_PLAYER_SCORE_RE = re.compile(
     r"(?im)\b([A-Za-z][A-Za-z0-9_-]*)_seat_([OX])\s*:\s*\d+\b"
 )
 NO_RETURNED_RESULT = object()
+
+
+def _parse_terminal_event(output: str) -> dict[str, Any] | None:
+    """Retain exact GNU terminal semantics before automatic game advancement."""
+    results = TERMINAL_RESULT_RE.findall(output)
+    drops = TERMINAL_DROP_RE.findall(output)
+    resignations = TERMINAL_RESIGN_RE.findall(output)
+    if not results:
+        if drops or resignations:
+            raise MatchExecutionError("GNU terminal output has action semantics without one game result")
+        return None
+    if len(results) != 1 or len(drops) > 1 or len(resignations) > 1 or (drops and resignations):
+        raise MatchExecutionError("GNU terminal output is ambiguous or duplicated")
+    winner_engine, winner_seat, result_name, raw_points = results[0]
+    points = int(raw_points)
+    if points <= 0:
+        raise MatchExecutionError("GNU terminal output has invalid awarded points")
+    event: dict[str, Any] = {
+        "kind": "ordinary_game_over",
+        "winner_physical_seat": winner_seat,
+        "winner_engine": winner_engine,
+        "points": points,
+        "result_level": {"single game": 1, "gammon": 2, "backgammon": 3}[result_name.lower()],
+    }
+    if drops:
+        loser_engine, loser_seat, raw_given_points = drops[0]
+        if loser_seat == winner_seat or int(raw_given_points) != points:
+            raise MatchExecutionError("GNU drop output conflicts with its game result")
+        event.update({
+            "kind": "drop",
+            "loser_physical_seat": loser_seat,
+            "loser_engine": loser_engine,
+        })
+    elif resignations:
+        resign_winner_engine, resign_winner_seat, resign_result_name = resignations[0]
+        resignation_level = {"single game": 1, "gammon": 2, "backgammon": 3}[
+            resign_result_name.lower()
+        ]
+        if (resign_winner_engine, resign_winner_seat) != (winner_engine, winner_seat):
+            raise MatchExecutionError("GNU resignation output conflicts with its game result")
+        event.update({"kind": "resignation", "resignation_level": resignation_level})
+    return event
 
 
 def _raise_on_gnu_error(command: str, output: str) -> None:
@@ -661,7 +713,7 @@ def _validate_command_transition(
     engine: str,
     engine_by_seat: Mapping[str, str],
     expected_next_roll_seat: str | None,
-    reported_completion: bool,
+    terminal_event: Mapping[str, Any] | None,
 ) -> None:
     """Fail closed unless a changed GNU ID represents the commanded transition."""
     if (
@@ -695,12 +747,13 @@ def _validate_command_transition(
     )
     score_delta = (next_score[0] - previous_score[0], next_score[1] - previous_score[1])
     score_changed = score_delta != (0, 0)
-    if score_changed != reported_completion:
+    if score_changed != (terminal_event is not None):
         raise MatchExecutionError("GNU completed-game output/state transition is missing or misparsed")
 
     checker_command = command not in {"roll", "double", "take", "pass", "accept"}
     winner: str | None = None
     expected_points: int | None = None
+    expected_result_level: int | None = None
     expected_final_board: tuple[Any, ...] | None = None
     if checker_command:
         if (
@@ -727,6 +780,7 @@ def _validate_command_transition(
                     or any(expected_final_board[loser_points_offset][18:24])
                 ) else 2
             expected_points = cube_value * multiplier
+            expected_result_level = multiplier
         elif score_changed:
             raise MatchExecutionError("GNU checker command awarded points before bearing off all checkers")
     elif command in {"roll", "double"}:
@@ -752,6 +806,7 @@ def _validate_command_transition(
             raise MatchExecutionError(f"GNU {command} precondition is semantically invalid")
         winner = other if command == "pass" else None
         expected_points = cube_value if command == "pass" else None
+        expected_result_level = 1 if command == "pass" else None
     elif command == "accept":
         multiplier = pending.resignation_multiplier
         expected_resignation = (
@@ -768,6 +823,7 @@ def _validate_command_transition(
             raise MatchExecutionError("GNU resignation precondition is semantically invalid")
         winner = actor
         expected_points = cube_value * multiplier
+        expected_result_level = multiplier
     else:  # pragma: no cover - all strings are checker commands or listed above
         raise MatchExecutionError(f"unsupported GNU command transition: {command}")
 
@@ -781,6 +837,30 @@ def _validate_command_transition(
         expected_delta[winner_index] = expected_points
         if score_delta != tuple(expected_delta):
             raise MatchExecutionError("GNU command awarded the wrong score or winner")
+        expected_winner_seat = _seat(winner)
+        if (
+            terminal_event is None
+            or terminal_event.get("winner_physical_seat") != expected_winner_seat
+            or terminal_event.get("winner_engine") != engine_by_seat[expected_winner_seat]
+            or terminal_event.get("points") != expected_points
+            or terminal_event.get("result_level") != expected_result_level
+        ):
+            raise MatchExecutionError("GNU terminal event has the wrong winner or points")
+        if command == "pass":
+            if (
+                terminal_event.get("kind") != "drop"
+                or terminal_event.get("loser_physical_seat") != physical_seat
+                or terminal_event.get("loser_engine") != engine
+            ):
+                raise MatchExecutionError("GNU pass did not produce exact drop semantics")
+        elif command == "accept":
+            if (
+                terminal_event.get("kind") != "resignation"
+                or terminal_event.get("resignation_level") != pending.resignation_multiplier
+            ):
+                raise MatchExecutionError("GNU accept did not produce exact resignation semantics")
+        elif checker_command and terminal_event.get("kind") != "ordinary_game_over":
+            raise MatchExecutionError("GNU checker completion did not produce ordinary game-over semantics")
         match_complete = max(next_score[:2]) >= next_score[2]
         if match_complete:
             if consumed:
@@ -811,7 +891,7 @@ def _validate_command_transition(
             )
         return
 
-    if reported_completion:
+    if terminal_event is not None:
         raise MatchExecutionError("GNU reported a game completion without the exact score transition")
     if consumed and any(entry.get("prompt_type") == "opening" for entry in consumed):
         raise MatchExecutionError("GNU consumed opening dice without completing a game")
@@ -1237,26 +1317,19 @@ class PairExecutor:
                             self._persist_policy_failure(match_root, analysis_context, record, exc)
                             raise
                         dice.prepare_after_turn(game_number, physical_seat)
-                    evidence.write(
-                        json.dumps(
-                            {
-                                "campaign_id": identity.campaign_id,
-                                "pair_id": identity.pair_id,
-                                "pair_index": identity.pair_index,
-                                "pair_member": side,
-                                "match_side": side,
-                                "game_number": game_number,
-                                "physical_seat": physical_seat,
-                                "engine": engine,
-                                "gnuid": gnuid,
-                                "command": command,
-                                "engine_kit_result": record,
-                            },
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        )
-                        + "\n"
-                    )
+                    decision_evidence = {
+                        "campaign_id": identity.campaign_id,
+                        "pair_id": identity.pair_id,
+                        "pair_index": identity.pair_index,
+                        "pair_member": side,
+                        "match_side": side,
+                        "game_number": game_number,
+                        "physical_seat": physical_seat,
+                        "engine": engine,
+                        "gnuid": gnuid,
+                        "command": command,
+                        "engine_kit_result": record,
+                    }
                     before_consumption = len(dice.consumption)
                     previous_score = (int(position.score.player_0), int(position.score.player_1))
                     output = board.send(command, timeout_seconds=120.0)
@@ -1268,7 +1341,7 @@ class PairExecutor:
                     next_position = self.engine_kit.position_from_gnuid(next_gnuid)
                     next_score = (int(next_position.score.player_0), int(next_position.score.player_1))
                     score_changed = next_score != previous_score
-                    reported_completion = GAME_WIN_RE.search(output) is not None
+                    terminal_event = _parse_terminal_event(output)
                     _validate_command_transition(
                         command,
                         position,
@@ -1279,9 +1352,38 @@ class PairExecutor:
                         engine,
                         engine_by_seat,
                         dice.expected_next_roll_seat,
-                        reported_completion,
+                        terminal_event,
                     )
                     opening_consumed = any(entry.get("prompt_type") == "opening" for entry in consumed)
+                    subsequent_opening = None
+                    if terminal_event is not None and max(next_score) < 7:
+                        subsequent_opening = {
+                            "game_number": game_number + 1,
+                            "gnuid": next_gnuid,
+                            "score": list(next_score),
+                            "on_roll_physical_seat": _seat(next_position.state.on_roll),
+                            "decision_physical_seat": _seat(next_position.state.decision_player),
+                            "dice": list(next_position.state.dice),
+                        }
+                    decision_evidence["transition_evidence"] = {
+                        "command_type": (
+                            "pass" if command == "pass" else
+                            "accepted_resignation" if command == "accept" else
+                            "checker" if command not in {"roll", "double", "take"} else command
+                        ),
+                        "acting_physical_seat": physical_seat,
+                        "acting_engine": engine,
+                        "pre_command": {"gnuid": gnuid, "score": list(previous_score)},
+                        "terminal_event": terminal_event,
+                        "post_command": {"gnuid": next_gnuid, "score": list(next_score)},
+                        "game_number": game_number,
+                        "subsequent_opening_state": subsequent_opening,
+                    }
+                    evidence.write(
+                        json.dumps(decision_evidence, sort_keys=True, separators=(",", ":")) + "\n"
+                    )
+                    evidence.flush()
+                    os.fsync(evidence.fileno())
                     if score_changed:
                         if max(next_score) >= 7:
                             if opening_consumed:

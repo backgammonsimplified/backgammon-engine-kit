@@ -16,6 +16,7 @@ from runner.sage_gnu_campaign.match import (
     MatchExecutionError,
     PairExecutor,
     _board_environment,
+    _parse_terminal_event,
     _raise_on_gnu_error,
     _validate_command_transition,
     _validate_native_outputs,
@@ -198,7 +199,10 @@ class FakeBoard:
                     {"prompt_type": "opening", "game_number": 2, "roll_index": 2, "physical_seat": "X", "engine": "gnu", "die1": 4, "die2": None},
                 ])
                 self.dice.expected_next_roll_seat = "O"
-                return "sage wins 6 points"
+                return (
+                    "sage_seat_O moves 1/off.\n"
+                    "sage_seat_O wins a backgammon and 6 points.\n"
+                )
         if command == "take":
             self.dice.consumption.append(
                 {"prompt_type": "checker", "game_number": 2, "physical_seat": "X", "engine": "gnu", "die1": 2, "die2": 2}
@@ -214,7 +218,10 @@ class FakeBoard:
             path = Path(command.removeprefix("export match text "))
             path.write_text("7 point match\n\n Game 1\n sage_seat_O : 0  gnu_seat_X : 0\n", encoding="utf-8")
         if command == "pass":
-            return "sage wins 2 points"
+            return (
+                "gnu_seat_X refuses the cube and gives up 2 points.\n"
+                "sage_seat_O wins a single game and 2 points.\n"
+            )
         return "ok"
 
     def close(self) -> None:
@@ -287,6 +294,28 @@ def position(
             ),
         ),
     )
+
+
+def terminal_event(
+    kind: str, winner_seat: str, points: int, *, loser_seat: str | None = None,
+    resignation_level: int | None = None, result_level: int = 1,
+) -> dict[str, object]:
+    engine_by_seat = {"O": "sage", "X": "gnu"}
+    event: dict[str, object] = {
+        "kind": kind,
+        "winner_physical_seat": winner_seat,
+        "winner_engine": engine_by_seat[winner_seat],
+        "points": points,
+        "result_level": result_level,
+    }
+    if loser_seat is not None:
+        event.update({
+            "loser_physical_seat": loser_seat,
+            "loser_engine": engine_by_seat[loser_seat],
+        })
+    if resignation_level is not None:
+        event["resignation_level"] = resignation_level
+    return event
 
 
 class FakeEngineKit:
@@ -434,6 +463,28 @@ def test_run_match_simulates_all_normal_policy_paths_without_board_evaluation(
         command == "hint" or command.startswith("hint ") or command == "show evaluation"
         for command in FakeBoard.last.commands
     )
+    decisions = [
+        json.loads(line)
+        for line in (tmp_path / "match-A/decisions.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    first_terminal = decisions[0]["transition_evidence"]
+    assert first_terminal["command_type"] == "checker"
+    assert first_terminal["acting_physical_seat"] == "O"
+    assert first_terminal["acting_engine"] == "sage"
+    assert first_terminal["pre_command"]["gnuid"] == decisions[0]["gnuid"]
+    assert first_terminal["terminal_event"] == terminal_event(
+        "ordinary_game_over", "O", 6, result_level=3
+    )
+    assert first_terminal["post_command"]["score"] == [6, 0]
+    assert first_terminal["game_number"] == 1
+    assert first_terminal["subsequent_opening_state"]["game_number"] == 2
+    final_terminal = decisions[-1]["transition_evidence"]
+    assert final_terminal["command_type"] == "pass"
+    assert final_terminal["terminal_event"] == terminal_event(
+        "drop", "O", 2, loser_seat="X"
+    )
+    assert final_terminal["post_command"]["score"] == [8, 0]
+    assert final_terminal["subsequent_opening_state"] is None
 
 
 @pytest.mark.parametrize(
@@ -534,7 +585,8 @@ def test_resignation_accept_requires_exact_score_cube_action_and_turn_state() ->
         on_roll="player_1", cube_value=2, game_state="resigned",
     )
     _validate_command_transition(
-        "accept", before, after, [], 1, "O", "sage", mapping, "X", True
+        "accept", before, after, [], 1, "O", "sage", mapping, "X",
+        terminal_event("resignation", "O", 4, resignation_level=2, result_level=2),
     )
 
     after.cube.pending_action = SimpleNamespace(
@@ -543,7 +595,8 @@ def test_resignation_accept_requires_exact_score_cube_action_and_turn_state() ->
     )
     with pytest.raises(MatchExecutionError, match="cube or turn ownership"):
         _validate_command_transition(
-            "accept", before, after, [], 1, "O", "sage", mapping, "X", True
+            "accept", before, after, [], 1, "O", "sage", mapping, "X",
+            terminal_event("resignation", "O", 4, resignation_level=2, result_level=2),
         )
 
     mislabeled = position(
@@ -552,7 +605,8 @@ def test_resignation_accept_requires_exact_score_cube_action_and_turn_state() ->
     )
     with pytest.raises(MatchExecutionError, match="invalid turn/action state"):
         _validate_command_transition(
-            "accept", before, mislabeled, [], 1, "O", "sage", mapping, "X", True
+            "accept", before, mislabeled, [], 1, "O", "sage", mapping, "X",
+            terminal_event("resignation", "O", 4, resignation_level=2, result_level=2),
         )
 
 
@@ -571,13 +625,13 @@ def test_checker_move_reconciles_an_automatically_consumed_next_roll_exactly() -
         "engine": "gnu", "die1": 4, "die2": 2,
     }]
     _validate_command_transition(
-        "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", False
+        "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", None
     )
 
     after.state.dice = (2, 4)
     with pytest.raises(MatchExecutionError, match="wrong board, cube, action, dice, or turn"):
         _validate_command_transition(
-            "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", False
+            "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", None
         )
 
 
@@ -618,7 +672,7 @@ def test_checker_transition_rejects_every_stale_action_field(case: str) -> None:
 
     with pytest.raises(MatchExecutionError, match="wrong board, cube, action, dice, or turn"):
         _validate_command_transition(
-            "13/8", before, after, [], 1, "O", "sage", mapping, "X", False
+            "13/8", before, after, [], 1, "O", "sage", mapping, "X", None
         )
 
 
@@ -634,7 +688,7 @@ def test_checker_transition_requires_command_to_agree_with_previous_dice() -> No
     )
     with pytest.raises(MatchExecutionError, match="prior dice"):
         _validate_command_transition(
-            "13/8", before, after, [], 1, "O", "sage", mapping, "X", False
+            "13/8", before, after, [], 1, "O", "sage", mapping, "X", None
         )
 
 
@@ -647,12 +701,12 @@ def test_roll_transition_rejects_unexpected_action_metadata() -> None:
         "engine": "sage", "die1": 3, "die2": 2,
     }]
     _validate_command_transition(
-        "roll", before, after, consumed, 1, "O", "sage", mapping, "X", False
+        "roll", before, after, consumed, 1, "O", "sage", mapping, "X", None
     )
     after.cube.pending_action.resignation_multiplier = 1
     with pytest.raises(MatchExecutionError, match="changed checker or cube state"):
         _validate_command_transition(
-            "roll", before, after, consumed, 1, "O", "sage", mapping, "X", False
+            "roll", before, after, consumed, 1, "O", "sage", mapping, "X", None
         )
 
 
@@ -682,7 +736,7 @@ def test_take_transition_requires_exact_cube_and_cleared_action(case: str) -> No
 
     with pytest.raises(MatchExecutionError, match="wrong cube, action, dice, or turn state"):
         _validate_command_transition(
-            "take", before, after, [], 1, "X", "gnu", mapping, "O", False
+            "take", before, after, [], 1, "X", "gnu", mapping, "O", None
         )
 
 
@@ -695,12 +749,14 @@ def test_pass_requires_game_over_not_resigned() -> None:
     )
     valid = position(7, None, "none", None, on_roll="player_0", game_state="game_over")
     _validate_command_transition(
-        "pass", before, valid, [], 1, "X", "gnu", mapping, "O", True
+        "pass", before, valid, [], 1, "X", "gnu", mapping, "O",
+        terminal_event("drop", "O", 1, loser_seat="X"),
     )
     mislabeled = position(7, None, "none", None, on_roll="player_0", game_state="resigned")
     with pytest.raises(MatchExecutionError, match="invalid turn/action state"):
         _validate_command_transition(
-            "pass", before, mislabeled, [], 1, "X", "gnu", mapping, "O", True
+            "pass", before, mislabeled, [], 1, "X", "gnu", mapping, "O",
+            terminal_event("drop", "O", 1, loser_seat="X"),
         )
 
 
@@ -714,7 +770,8 @@ def test_normal_bearoff_requires_game_over_not_resigned() -> None:
         on_roll="player_0", game_state="game_over",
     )
     _validate_command_transition(
-        "1/off", before, valid, [], 1, "O", "sage", mapping, "X", True
+        "1/off", before, valid, [], 1, "O", "sage", mapping, "X",
+        terminal_event("ordinary_game_over", "O", 1),
     )
     mislabeled = position(
         7, None, "none", None, board=final_board,
@@ -722,7 +779,117 @@ def test_normal_bearoff_requires_game_over_not_resigned() -> None:
     )
     with pytest.raises(MatchExecutionError, match="invalid turn/action state"):
         _validate_command_transition(
-            "1/off", before, mislabeled, [], 1, "O", "sage", mapping, "X", True
+            "1/off", before, mislabeled, [], 1, "O", "sage", mapping, "X",
+            terminal_event("ordinary_game_over", "O", 1),
+        )
+
+
+def next_game_opening(score_o: int, score_x: int = 0) -> tuple[object, list[dict[str, object]]]:
+    opening = position(
+        score_o, "player_0", "none", (4, 2), player_1_score=score_x,
+        on_roll="player_0",
+    )
+    consumed = [
+        {
+            "prompt_type": "opening", "game_number": 2, "roll_index": 1,
+            "physical_seat": "O", "engine": "sage", "die1": 4, "die2": None,
+        },
+        {
+            "prompt_type": "opening", "game_number": 2, "roll_index": 1,
+            "physical_seat": "X", "engine": "gnu", "die1": 2, "die2": None,
+        },
+    ]
+    return opening, consumed
+
+
+def test_nonfinal_pass_rejects_resignation_with_right_score_and_opening() -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before = position(
+        0, "player_1", "double", None, on_roll="player_0",
+        offerer="player_0", responder="player_1", offered_cube_value=2,
+    )
+    after, consumed = next_game_opening(1)
+    with pytest.raises(MatchExecutionError, match="exact drop semantics"):
+        _validate_command_transition(
+            "pass", before, after, consumed, 1, "X", "gnu", mapping, "X",
+            terminal_event("resignation", "O", 1, resignation_level=1),
+        )
+
+
+def test_nonfinal_resignation_rejects_game_over_with_right_score_and_opening() -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before = position(
+        0, "player_0", "resignation", None, on_roll="player_1",
+        offerer="player_1", responder="player_0", resignation_multiplier=2,
+    )
+    after, consumed = next_game_opening(2)
+    with pytest.raises(MatchExecutionError, match="exact resignation semantics"):
+        _validate_command_transition(
+            "accept", before, after, consumed, 1, "O", "sage", mapping, "X",
+            terminal_event("ordinary_game_over", "O", 2, result_level=2),
+        )
+
+
+@pytest.mark.parametrize("wrong_kind", ["resignation", "drop"])
+def test_nonfinal_bearoff_rejects_substituted_terminal_kind_with_right_transition(
+    wrong_kind: str,
+) -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before = position(
+        0, "player_0", "none", (1, 1),
+        board=fake_board_state({1: 1}, {24: 1}, off_0=14, off_1=14),
+    )
+    after, consumed = next_game_opening(1)
+    event = terminal_event(
+        wrong_kind, "O", 1,
+        loser_seat="X" if wrong_kind == "drop" else None,
+        resignation_level=1 if wrong_kind == "resignation" else None,
+    )
+    with pytest.raises(MatchExecutionError, match="ordinary game-over semantics"):
+        _validate_command_transition(
+            "1/off", before, after, consumed, 1, "O", "sage", mapping, "X", event,
+        )
+
+
+def test_nonfinal_terminal_event_rejects_right_kind_with_wrong_score() -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before = position(
+        0, "player_1", "double", None, on_roll="player_0",
+        offerer="player_0", responder="player_1", offered_cube_value=2,
+    )
+    after, consumed = next_game_opening(2)
+    with pytest.raises(MatchExecutionError, match="wrong score or winner"):
+        _validate_command_transition(
+            "pass", before, after, consumed, 1, "X", "gnu", mapping, "X",
+            terminal_event("drop", "O", 1, loser_seat="X"),
+        )
+
+
+def test_terminal_output_parser_preserves_exact_native_semantics() -> None:
+    drop = _parse_terminal_event(
+        "gnu_seat_X refuses the cube and gives up 2 points.\n"
+        "sage_seat_O wins a single game and 2 points.\n"
+    )
+    resignation = _parse_terminal_event(
+        "sage_seat_O accepts and wins a gammon.\n"
+        "sage_seat_O wins a gammon and 4 points.\n"
+    )
+    ordinary = _parse_terminal_event("sage_seat_O wins a backgammon and 6 points.\n")
+    assert drop == terminal_event("drop", "O", 2, loser_seat="X")
+    assert resignation == terminal_event(
+        "resignation", "O", 4, resignation_level=2, result_level=2
+    )
+    assert ordinary == terminal_event("ordinary_game_over", "O", 6, result_level=3)
+
+
+def test_terminal_output_parser_rejects_ambiguous_or_conflicting_events() -> None:
+    with pytest.raises(MatchExecutionError, match="action semantics"):
+        _parse_terminal_event("gnu_seat_X refuses the cube and gives up 1 point.\n")
+    with pytest.raises(MatchExecutionError, match="ambiguous"):
+        _parse_terminal_event(
+            "sage_seat_O accepts and wins a single game.\n"
+            "gnu_seat_X refuses the cube and gives up 1 point.\n"
+            "sage_seat_O wins a single game and 1 point.\n"
         )
 
 

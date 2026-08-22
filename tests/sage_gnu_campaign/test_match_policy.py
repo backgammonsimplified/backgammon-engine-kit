@@ -12,6 +12,7 @@ from runner.sage_gnu_campaign.engine_kit import ReturnedAnalysis
 from runner.sage_gnu_campaign.identity import pair_identity
 from runner.sage_gnu_campaign.manifests import write_json
 from runner.sage_gnu_campaign.match import (
+    GnuBoardProcess,
     MatchExecutionError,
     PairExecutor,
     _board_environment,
@@ -40,6 +41,46 @@ def test_board_environment_overrides_engine_kit_dev_null_home(tmp_path: Path) ->
     assert env["LANG"] == "C"
     assert env["LC_ALL"] == "C"
     assert env["OMP_NUM_THREADS"] == "1"
+
+
+def test_board_constructor_cleanup_failure_preserves_primary_startup_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import runner.sage_gnu_campaign.match as match_module
+
+    class KnownStartupError(RuntimeError):
+        pass
+
+    class KnownCleanupError(RuntimeError):
+        pass
+
+    startup_error = KnownStartupError("known startup failure")
+    cleanup_error = KnownCleanupError("known cleanup failure")
+    original_cleanup = GnuBoardProcess._cleanup
+    isolated_home = tmp_path / "gnubg-home"
+
+    def fail_startup() -> tuple[int, int]:
+        raise startup_error
+
+    def clean_then_fail(self: GnuBoardProcess, *, terminate: bool) -> None:
+        original_cleanup(self, terminate=terminate)
+        raise cleanup_error
+
+    monkeypatch.setattr(match_module.pty, "openpty", fail_startup)
+    monkeypatch.setattr(GnuBoardProcess, "_cleanup", clean_then_fail)
+    constructed = None
+    with pytest.raises(KnownStartupError) as caught:
+        constructed = GnuBoardProcess(
+            Path("/fake/gnubg"), {}, FakeDice(tmp_path / "dice"), isolated_home
+        )
+
+    assert caught.value is startup_error
+    assert constructed is None
+    assert not isolated_home.exists()
+    assert any(
+        "GNU board constructor cleanup also failed: KnownCleanupError: known cleanup failure" in note
+        for note in caught.value.__notes__
+    )
 
 
 def cube_decision(take: object, passed: object, recommendation: str = "no-double") -> dict:

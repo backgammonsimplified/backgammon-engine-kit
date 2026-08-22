@@ -242,10 +242,12 @@ class GnuBoardProcess:
         isolated_home: Path,
     ):
         self.isolated_home = Path(isolated_home).resolve()
-        self.isolated_home.mkdir(parents=False, exist_ok=False)
-        env = _board_environment(environment, self.isolated_home)
+        self._owns_isolated_home = False
         self.master_fd = -1
         try:
+            self.isolated_home.mkdir(parents=False, exist_ok=False)
+            self._owns_isolated_home = True
+            env = _board_environment(environment, self.isolated_home)
             self.master_fd, slave_fd = pty.openpty()
             try:
                 attributes = termios.tcgetattr(slave_fd)
@@ -259,39 +261,91 @@ class GnuBoardProcess:
                     env=env,
                     close_fds=True,
                 )
-            finally:
+            except BaseException as startup_error:
+                try:
+                    os.close(slave_fd)
+                except BaseException as close_error:
+                    startup_error.add_note(
+                        "GNU board slave-PTY cleanup also failed: "
+                        f"{type(close_error).__name__}: {close_error}"
+                    )
+                raise
+            else:
                 os.close(slave_fd)
             self.dice = dice
             self.selector = selectors.DefaultSelector()
             self.selector.register(self.master_fd, selectors.EVENT_READ)
             self.transcript: list[dict[str, str]] = []
             self._read_until_prompt("<startup>")
-        except BaseException:
-            self._cleanup(terminate=True)
+        except BaseException as startup_error:
+            try:
+                self._cleanup(terminate=True)
+            except BaseException as cleanup_error:
+                startup_error.add_note(
+                    "GNU board constructor cleanup also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
             raise
 
     def _cleanup(self, *, terminate: bool) -> None:
+        cleanup_errors: list[BaseException] = []
         process = getattr(self, "process", None)
-        if process is not None and terminate and process.poll() is None:
-            process.terminate()
+        try:
+            running = process is not None and process.poll() is None
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+            running = False
+        if process is not None and terminate and running:
             try:
-                process.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5.0)
+                process.terminate()
+                try:
+                    process.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5.0)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+                try:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=5.0)
+                except BaseException as fallback_exc:
+                    cleanup_errors.append(fallback_exc)
         selector = getattr(self, "selector", None)
         if selector is not None:
-            selector.close()
+            try:
+                selector.close()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
         if getattr(self, "master_fd", -1) >= 0:
             try:
                 os.close(self.master_fd)
-            except OSError:
-                pass
-            self.master_fd = -1
-        if self.isolated_home.exists():
-            shutil.rmtree(self.isolated_home)
-        if self.isolated_home.exists():
-            raise MatchExecutionError("GNU isolated HOME survived cleanup")
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            finally:
+                self.master_fd = -1
+        if getattr(self, "_owns_isolated_home", False):
+            try:
+                if self.isolated_home.exists():
+                    shutil.rmtree(self.isolated_home)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            try:
+                home_survived = self.isolated_home.exists()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+                home_survived = True
+            if home_survived:
+                cleanup_errors.append(MatchExecutionError("GNU isolated HOME survived cleanup"))
+            else:
+                self._owns_isolated_home = False
+        if cleanup_errors:
+            for additional_error in cleanup_errors[1:]:
+                cleanup_errors[0].add_note(
+                    "additional GNU board cleanup failure: "
+                    f"{type(additional_error).__name__}: {additional_error}"
+                )
+            raise cleanup_errors[0]
 
     def _read_until_prompt(self, command: str, timeout_seconds: float = 60.0) -> str:
         deadline = time.monotonic() + timeout_seconds

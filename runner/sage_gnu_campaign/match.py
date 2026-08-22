@@ -19,7 +19,7 @@ from .config import CampaignConfig
 from .dice import SeatDiceController
 from .engine_kit import EngineKitSession, analysis_result_forensics
 from .identity import PairIdentity
-from .manifests import sha256_file, write_json
+from .manifests import fsync_directory, sha256_file, write_json
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9?;]*[A-Za-z]")
@@ -49,6 +49,15 @@ def _append_jsonl_durable(path: Path, record: Mapping[str, Any]) -> None:
         handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _create_empty_file_durable(path: Path) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    fsync_directory(path.parent)
 
 
 def _validate_native_outputs(sgf_path: Path, text_path: Path) -> None:
@@ -570,8 +579,8 @@ class PairExecutor:
         decision_path = match_root / "decisions.jsonl"
         request_path = match_root / "analysis_requests.jsonl"
         result_path = match_root / "analysis_results.jsonl"
-        request_path.touch(exist_ok=False)
-        result_path.touch(exist_ok=False)
+        _create_empty_file_durable(request_path)
+        _create_empty_file_durable(result_path)
         decisions = 0
         game_number = 1
         completed = False

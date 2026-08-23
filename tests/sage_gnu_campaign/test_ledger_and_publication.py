@@ -19,7 +19,11 @@ from runner.sage_gnu_campaign.manifests import (
     write_bytes_atomic,
     write_json,
 )
-from runner.sage_gnu_campaign.match import MatchExecutionError
+from runner.sage_gnu_campaign.match import (
+    MatchExecutionError,
+    _frozen_gnu_sgf_application,
+    _validate_native_outputs,
+)
 from tests.sage_gnu_campaign.native_fixtures import native_documents, write_execution_fixture
 
 
@@ -674,6 +678,52 @@ def test_publication_requires_complete_frozen_dice_stream_inventory(
     artifact_root = tmp_path / "artifacts"
     artifact_root.mkdir()
     with pytest.raises(MatchExecutionError, match="dice|stream|CSV"):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
+
+
+def test_publication_rejects_sgf_setup_inconsistent_with_decision_gnuid(
+    tmp_path: Path,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    write_execution_fixture(execution, identity)
+    match = execution / "matches/A"
+    sgf_path = match / "native/match.sgf"
+    sgf = sgf_path.read_text(encoding="utf-8")
+    setup = re.search(r"AW((?:\[[a-y]\])+)", sgf)
+    assert setup is not None
+    first = re.search(r"\[([a-y])\]", setup.group(1))
+    assert first is not None
+    changed = "b" if first.group(1) != "b" else "c"
+    absolute_start = setup.start(1) + first.start(1)
+    sgf_path.write_text(
+        sgf[:absolute_start] + changed + sgf[absolute_start + 1:], encoding="utf-8"
+    )
+    manifest_path = match / "match_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["native_evidence"] = _validate_native_outputs(
+        sgf_path, match / "native/match.txt", {"O": "sage", "X": "gnu"},
+        _frozen_gnu_sgf_application(config),
+    )
+    manifest["output_sha256"]["native/match.sgf"] = hashlib.sha256(
+        sgf_path.read_bytes()
+    ).hexdigest()
+    write_json(manifest_path, manifest)
+    result_path = execution / "execution_result.json"
+    execution_result = json.loads(result_path.read_text())
+    execution_result["matches"] = [
+        manifest if item["side"] == "A" else item
+        for item in execution_result["matches"]
+    ]
+    write_json(result_path, execution_result)
+
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    with pytest.raises(MatchExecutionError, match="SGF initial state"):
         publish_pair(
             execution, artifact_root, config, identity, publication_common(),
             {"attempt_count": 1, "transitions": []},

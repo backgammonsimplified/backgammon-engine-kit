@@ -74,6 +74,15 @@ SGF_RESULT_RE = re.compile(r"^([WB])\+(\d+)(R(?:esign)?)?$", re.IGNORECASE)
 GNU_RUNTIME_VERSION_RE = re.compile(r"^(\d+\.\d+\.\d+) (\d{8})$")
 GNU_POSITION_ID_RE = re.compile(r"^[A-Za-z0-9+/]{14}$")
 GNU_MATCH_ID_RE = re.compile(r"^[A-Za-z0-9+/]{12}$")
+SGF_ROOT_REQUIRED_PROPERTIES = {"FF", "GM", "AP", "MI", "PW", "PB", "RU", "RE"}
+SGF_ROOT_HARMLESS_PROPERTIES = {
+    "CA", "DT", "EV", "RO", "PC", "AN", "GC", "WR", "BR", "GS",
+}
+SGF_NODE_HARMLESS_PROPERTIES = {
+    "DA", "A", "MR", "CR", "C", "BM", "DO", "BC", "DC", "LU", "GB", "GW",
+}
+SGF_SETUP_PROPERTIES = {"PL", "AE", "AW", "AB"}
+SGF_UNSUPPORTED_STATE_PROPERTIES = {"CV", "CP", "DI"}
 NO_RETURNED_RESULT = object()
 
 
@@ -212,6 +221,7 @@ def _decode_publication_gnuid(value: str) -> Any:
             pending_action=pending,
         ),
         score=SimpleNamespace(player_0=score0, player_1=score1, match_length=match_length),
+        rules=SimpleNamespace(crawford=bool(_bit_value(bits, 7, 1))),
     )
 
 
@@ -350,7 +360,7 @@ def _validate_native_outputs(
             if key not in {"kind", "resignation_recorded"}
         }
         if (
-            {key: value for key, value in sgf_game.items() if key != "terminal"}
+            {key: value for key, value in sgf_game.items() if key not in {"terminal", "sgf_state"}}
             != {key: value for key, value in text_game.items() if key != "terminal"}
             or shared_sgf_terminal != shared_text_terminal
             or (sgf_terminal["kind"] == "drop") != (text_terminal["kind"] == "drop")
@@ -482,11 +492,67 @@ def _sgf_point(value: str, seat: str) -> str:
     return str(offset + 1 if seat == "O" else 24 - offset)
 
 
+def _starting_sgf_setup() -> dict[str, Any]:
+    points = [0] * 24
+    for point, count in ((6, 5), (8, 3), (13, 5), (24, 2)):
+        points[point - 1] = count
+    return {
+        "explicit": False,
+        "on_roll_physical_seat": None,
+        "players": {
+            seat: {"points": list(points), "bar": 0, "off": 0}
+            for seat in ("O", "X")
+        },
+    }
+
+
+def _parse_sgf_setup(node: Mapping[str, list[str]]) -> dict[str, Any]:
+    state_properties = set(node) - SGF_NODE_HARMLESS_PROPERTIES
+    if not state_properties <= SGF_SETUP_PROPERTIES or not {"PL", "AE"} <= state_properties:
+        raise MatchExecutionError("GNU saved SGF setup node has unsupported state properties")
+    if _one_sgf_property(node, "PL") not in {"W", "B"} or node.get("AE") != ["a:y"]:
+        raise MatchExecutionError("GNU saved SGF setup player/clear properties are malformed")
+    players: dict[str, dict[str, Any]] = {}
+    for seat, property_name in (("O", "AW"), ("X", "AB")):
+        points = [0] * 24
+        bar = 0
+        values = node.get(property_name, [])
+        if any(len(value) != 1 or not "a" <= value <= "y" for value in values):
+            raise MatchExecutionError("GNU saved SGF checker setup is malformed")
+        for value in values:
+            point = _sgf_point(value, seat)
+            if point == "bar":
+                bar += 1
+            elif point == "off":
+                raise MatchExecutionError("GNU saved SGF checker setup uses an invalid off point")
+            else:
+                points[int(point) - 1] += 1
+        represented = sum(points) + bar
+        if represented > 15:
+            raise MatchExecutionError("GNU saved SGF checker setup exceeds fifteen checkers")
+        players[seat] = {"points": points, "bar": bar, "off": 15 - represented}
+    return {
+        "explicit": True,
+        "on_roll_physical_seat": "O" if _one_sgf_property(node, "PL") == "W" else "X",
+        "players": players,
+    }
+
+
+def _validate_sgf_action_properties(nodes: list[dict[str, list[str]]]) -> None:
+    for node in nodes:
+        properties = set(node)
+        if properties & (SGF_SETUP_PROPERTIES | SGF_UNSUPPORTED_STATE_PROPERTIES):
+            raise MatchExecutionError("GNU saved SGF contains an unexpected state-bearing property")
+        if not properties <= ({"W", "B"} | SGF_NODE_HARMLESS_PROPERTIES):
+            raise MatchExecutionError("GNU saved SGF contains an unknown action property")
+
+
 def _parse_sgf_actions(nodes: list[dict[str, list[str]]]) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
-    if len(nodes) < 2:
+    if not nodes:
         raise MatchExecutionError("GNU saved SGF game has no played action body")
-    for node in nodes[1:]:
+    _validate_sgf_action_properties(nodes)
+    for node in nodes:
         move_properties = [name for name in ("W", "B") if name in node]
         if len(move_properties) != 1:
             raise MatchExecutionError("GNU saved SGF action node lacks one exact player move")
@@ -634,6 +700,14 @@ def _parse_sgf_match(
     for index, tree in enumerate(_split_sgf_collection(value)):
         nodes = _sgf_linear_nodes(tree)
         properties = nodes[0]
+        root_names = set(properties)
+        if (
+            not SGF_ROOT_REQUIRED_PROPERTIES <= root_names
+            or not root_names <= SGF_ROOT_REQUIRED_PROPERTIES | SGF_ROOT_HARMLESS_PROPERTIES
+            or root_names & SGF_UNSUPPORTED_STATE_PROPERTIES
+            or root_names & SGF_SETUP_PROPERTIES
+        ):
+            raise MatchExecutionError("GNU saved SGF root properties are incomplete or unsupported")
         if (
             _one_sgf_property(properties, "FF") != "4"
             or _one_sgf_property(properties, "GM") != "6"
@@ -662,7 +736,24 @@ def _parse_sgf_match(
         points = int(result_match.group(2))
         if points <= 0:
             raise MatchExecutionError("GNU saved SGF game result has invalid points")
-        actions = _parse_sgf_actions(nodes)
+        rules = _one_sgf_property(properties, "RU").split(":")
+        if (
+            not rules
+            or rules[0] != "Crawford"
+            or len(rules) != len(set(rules))
+            or any(rule not in {"Crawford", "CrawfordGame"} for rule in rules)
+        ):
+            raise MatchExecutionError("GNU saved SGF rules conflict with frozen normal match play")
+        action_nodes = nodes[1:]
+        setup = _starting_sgf_setup()
+        if action_nodes and set(action_nodes[0]) & SGF_SETUP_PROPERTIES:
+            setup = _parse_sgf_setup(action_nodes.pop(0))
+        actions = _parse_sgf_actions(action_nodes)
+        if (
+            setup["on_roll_physical_seat"] is not None
+            and setup["on_roll_physical_seat"] != actions[0]["physical_seat"]
+        ):
+            raise MatchExecutionError("GNU saved SGF setup player conflicts with the opening action")
         terminal_kind = (
             "resignation" if result_match.group(3) is not None
             else "drop" if actions[-1]["action"] == "drop"
@@ -681,6 +772,13 @@ def _parse_sgf_match(
                 "cube_value": 1,
                 "on_roll_physical_seat": actions[0]["physical_seat"],
                 "dice": actions[0]["dice"],
+            },
+            "sgf_state": {
+                "rules": {
+                    "crawford": True,
+                    "crawford_game": "CrawfordGame" in rules,
+                },
+                "setup": setup,
             },
             "actions": actions,
             "terminal": {
@@ -1084,6 +1182,7 @@ def _validate_publication_decisions(
     }
     checker_offsets = {number: 0 for number in journal_actions}
     action_ordinals = {number: 0 for number in journal_actions}
+    validated_initial_states: set[int] = set()
     connected_gnuid: str | None = None
     for index, record in enumerate(decisions, 1):
         game_number = record.get("game_number")
@@ -1142,6 +1241,34 @@ def _validate_publication_decisions(
             post_position = _decode_publication_gnuid(post["gnuid"])
         except MatchExecutionError as exc:
             raise MatchExecutionError("decision journal contains an invalid publication GNUID") from exc
+        if game_number not in validated_initial_states:
+            sgf_state = game.get("sgf_state")
+            if not isinstance(sgf_state, dict) or not isinstance(sgf_state.get("setup"), dict):
+                raise MatchExecutionError("GNU SGF initial state authority is missing")
+            setup = sgf_state["setup"]
+            players = setup.get("players")
+            if not isinstance(players, dict) or set(players) != {"O", "X"}:
+                raise MatchExecutionError("GNU SGF checker setup authority is malformed")
+            expected_board = (
+                15, 15,
+                tuple(players["O"]["points"]), players["O"]["bar"], players["O"]["off"],
+                tuple(players["X"]["points"]), players["X"]["bar"], players["X"]["off"],
+            )
+            opening = game["opening_state"]
+            rules = sgf_state.get("rules")
+            if (
+                _board_snapshot(pre_position) != expected_board
+                or pre_position.state.on_roll != _player(opening["on_roll_physical_seat"])
+                or list(pre_position.state.dice or ()) != opening["dice"]
+                or _cube_snapshot(pre_position) != (
+                    1, "center", "none", None, None, None, None
+                )
+                or not isinstance(rules, dict)
+                or rules.get("crawford") is not True
+                or pre_position.rules.crawford != rules.get("crawford_game")
+            ):
+                raise MatchExecutionError("GNU SGF initial state conflicts with decision GNUID")
+            validated_initial_states.add(game_number)
         event = transition.get("terminal_event")
         subsequent = transition.get("subsequent_opening_state")
         if event is None:

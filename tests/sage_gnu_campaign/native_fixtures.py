@@ -204,6 +204,19 @@ def _sgf_action(action: dict[str, Any]) -> str:
     return f";{prop}[{encoded}]"
 
 
+def _sgf_setup_node(players: dict[str, dict[str, Any]], on_roll: str) -> str:
+    rendered = [f";PL[{'W' if on_roll == 'O' else 'B'}]AE[a:y]"]
+    for seat, property_name in (("O", "AW"), ("X", "AB")):
+        values = [
+            _sgf_point(str(point), seat)
+            for point, count in enumerate(players[seat]["points"], 1)
+            for _ in range(count)
+        ] + ["y"] * players[seat]["bar"]
+        if values:
+            rendered.append(property_name + "".join(f"[{value}]" for value in values))
+    return "".join(rendered)
+
+
 def _text_action(action: dict[str, Any]) -> str:
     if action["action"] == "checker":
         dice = "".join(str(die) for die in action["dice"])
@@ -254,12 +267,26 @@ def native_documents(
         actions = _game_actions(
             winner, points, seed=seed, game_number=index + 1, terminal_kind=terminal_kind,
         )
+        setup_node = ""
+        if seed is not None and terminal_kind == "ordinary_game_over":
+            cube_value = max(
+                [action.get("cube_value", 1) for action in actions if action["action"] == "double"],
+                default=1,
+            )
+            setup_game = {
+                "winner_physical_seat": winner,
+                "points": points,
+                "terminal": {"result_level": points // cube_value},
+            }
+            setup_node = _sgf_setup_node(
+                _ordinary_fixture_players(setup_game, actions), actions[0]["physical_seat"]
+            )
         sgf.append(
             f"(;FF[4]GM[6]AP[{FROZEN_GNU_SGF_APPLICATION}]"
             f"MI[length:7][game:{index}][ws:{score[0]}][bs:{score[1]}]"
-            f"PW[{o_name}]PB[{x_name}]RE[{'W' if winner == 'O' else 'B'}+{points}"
+            f"PW[{o_name}]PB[{x_name}]RU[Crawford]RE[{'W' if winner == 'O' else 'B'}+{points}"
             f"{'R' if terminal_kind == 'resignation' else ''}]"
-            f"{''.join(_sgf_action(action) for action in actions)})\n"
+            f"{setup_node}{''.join(_sgf_action(action) for action in actions)})\n"
         )
         text.append(
             f"\n Game {index + 1}\n {o_name} : {score[0]}             {x_name} : {score[1]}\n"

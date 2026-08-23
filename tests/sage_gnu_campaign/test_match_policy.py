@@ -1270,13 +1270,60 @@ def test_native_outputs_reject_nonruntime_sgf_application(
     sgf_path.write_text(
         source.replace("AP[GNU Backgammon:1.08.003]", replacement), encoding="utf-8"
     )
-    with pytest.raises(MatchExecutionError, match="AP|format"):
+    with pytest.raises(MatchExecutionError, match="AP|format|root"):
         _validate_native_outputs(
             sgf_path,
             NATIVE_FIXTURES / "gnu-1.08.003-match.txt",
             {"O": "sage", "X": "gnu"},
             FROZEN_GNU_SGF_APPLICATION,
         )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda sgf: sgf.replace("RU[Crawford]", "RU[Crawford]CV[2]", 1),
+        lambda sgf: sgf.replace(";W[31hefe]", ";W[31hefe]CP[b]", 1),
+        lambda sgf: sgf.replace(";W[31hefe]", ";W[31hefe]PL[B]", 1),
+        lambda sgf: sgf.replace(";W[31hefe]", ";W[31hefe]DI[65]", 1),
+        lambda sgf: sgf.replace(";W[31hefe]", ";W[31hefe]AE[a:y]AW[a]", 1),
+        lambda sgf: sgf.replace(";B[42lpsu]", ";PL[B]AE[a:y]AW[a];B[42lpsu]", 1),
+        lambda sgf: sgf.replace(";W[31hefe]", ";PL[W]AW[a];W[31hefe]", 1),
+    ],
+    ids=[
+        "cv-implicit-1-to-2", "cube-owner", "player-to-move", "dice-property",
+        "checker-setup", "unexpected-midgame-setup", "inconsistent-setup",
+    ],
+)
+def test_native_outputs_reject_unsupported_state_bearing_sgf_properties(
+    tmp_path: Path, mutation,
+) -> None:
+    source = (NATIVE_FIXTURES / "gnu-1.08.003-match.sgf").read_text(encoding="utf-8")
+    sgf_path = tmp_path / "match.sgf"
+    sgf_path.write_text(mutation(source), encoding="utf-8")
+    with pytest.raises(MatchExecutionError, match="SGF|state|setup|root"):
+        _validate_native_outputs(
+            sgf_path,
+            NATIVE_FIXTURES / "gnu-1.08.003-match.txt",
+            {"O": "sage", "X": "gnu"}, FROZEN_GNU_SGF_APPLICATION,
+        )
+
+
+def test_native_outputs_accept_classified_harmless_gnu_metadata(tmp_path: Path) -> None:
+    source = (NATIVE_FIXTURES / "gnu-1.08.003-match.sgf").read_text(encoding="utf-8")
+    source = source.replace(
+        "AP[GNU Backgammon:1.08.003]",
+        "AP[GNU Backgammon:1.08.003]CA[UTF-8]DT[2026-08-23]GC[fixture metadata]",
+        1,
+    ).replace(";W[31hefe]", ";W[31hefe]C[action note]DA[analysis metadata]", 1)
+    sgf_path = tmp_path / "match.sgf"
+    sgf_path.write_text(source, encoding="utf-8")
+    summary = _validate_native_outputs(
+        sgf_path,
+        NATIVE_FIXTURES / "gnu-1.08.003-match.txt",
+        {"O": "sage", "X": "gnu"}, FROZEN_GNU_SGF_APPLICATION,
+    )
+    assert summary["final_score"] == [8, 0]
 
 
 @pytest.mark.parametrize("bad_sgf", ["", "(;FF[4]GM[6]", "junk(;FF[4]GM[6])"])

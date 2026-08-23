@@ -311,7 +311,7 @@ def _persist_attempt_failure(
     private_roots: tuple[Path, ...],
 ) -> dict[str, Any]:
     destination = root / "failures" / identity.pair_id / f"attempt-{attempt}"
-    destination.mkdir(parents=True, exist_ok=False)
+    _durably_create_failure_hierarchy(root, destination)
     analysis_records = []
     for path in sorted(workspace.rglob("analysis_failure.json")):
         try:
@@ -390,6 +390,54 @@ def _persist_attempt_failure(
         "sha256": sha256_file(failure_path),
         "raw_response": raw_record,
     }
+
+
+def _durably_create_failure_hierarchy(anchor: Path, destination: Path) -> None:
+    """Make each failure-bundle directory reachable from its durable anchor."""
+    requested_anchor = Path(anchor)
+    if requested_anchor.is_symlink() or not requested_anchor.is_dir():
+        raise CampaignError("failure hierarchy anchor is not an established directory")
+    durable_anchor = requested_anchor.resolve(strict=True)
+    target = Path(destination).resolve(strict=False)
+    if not target.is_relative_to(durable_anchor):
+        raise CampaignError("failure hierarchy escapes its durable campaign anchor")
+    current = durable_anchor
+    for component in target.relative_to(durable_anchor).parts:
+        child = current / component
+        if child.exists():
+            if child.is_symlink() or not child.is_dir():
+                raise CampaignError(f"failure hierarchy conflicts with non-directory: {child}")
+        else:
+            child.mkdir()
+        # Re-flush an existing component too: it may be the residue of a
+        # previous crash between child creation and the parent-directory fsync.
+        fsync_directory(child)
+        fsync_directory(current)
+        current = child
+
+
+def _persist_attempt_failure_preserving_primary(
+    root: Path,
+    identity: PairIdentity,
+    attempt: int,
+    workspace: Path,
+    exc: BaseException,
+    private_roots: tuple[Path, ...],
+) -> dict[str, Any]:
+    try:
+        return _persist_attempt_failure(
+            root, identity, attempt, workspace, exc, private_roots
+        )
+    except BaseException as persistence_exc:
+        exc.add_note(
+            "match failure evidence persistence also failed: "
+            f"{type(persistence_exc).__name__}: {persistence_exc}"
+        )
+        return {
+            "status": "persistence-failed",
+            "error_type": type(persistence_exc).__name__,
+            "error_message": _sanitize_failure_value(str(persistence_exc), private_roots),
+        }
 
 
 def _finalize_run_manifest(path: Path, manifest: dict[str, Any], state: str, stop_reason: str) -> dict[str, Any]:
@@ -512,14 +560,18 @@ def run_campaign(
             try:
                 execution_root = executor.run(identity, workspace)
             except KeyboardInterrupt as exc:
-                failure = _persist_attempt_failure(root, identity, attempt, workspace, exc, private_roots)
+                failure = _persist_attempt_failure_preserving_primary(
+                    root, identity, attempt, workspace, exc, private_roots
+                )
                 run_manifest["pair_actions"].append(
                     {"pair_id": identity.pair_id, "action": "interrupted-incomplete", "attempt": attempt, "failure": failure}
                 )
                 _finalize_run_manifest(run_manifest_path, run_manifest, "interrupted", "operator-interrupt-incomplete-pair")
                 raise
             except Exception as exc:
-                failure = _persist_attempt_failure(root, identity, attempt, workspace, exc, private_roots)
+                failure = _persist_attempt_failure_preserving_primary(
+                    root, identity, attempt, workspace, exc, private_roots
+                )
                 ledger.transition(
                     identity.pair_id, "failed",
                     reason=f"attempt-failed:{type(exc).__name__}", attempt=attempt,
@@ -547,7 +599,9 @@ def run_campaign(
                         )
                     except Exception:
                         marker_hash = None
-                failure = _persist_attempt_failure(root, identity, attempt, workspace, exc, private_roots)
+                failure = _persist_attempt_failure_preserving_primary(
+                    root, identity, attempt, workspace, exc, private_roots
+                )
                 if marker_hash is None:
                     ledger.transition(
                         identity.pair_id, "failed",
@@ -575,7 +629,9 @@ def run_campaign(
                     committed_marker_sha256=marker_hash,
                 )
             except Exception as exc:
-                failure = _persist_attempt_failure(root, identity, attempt, workspace, exc, private_roots)
+                failure = _persist_attempt_failure_preserving_primary(
+                    root, identity, attempt, workspace, exc, private_roots
+                )
                 run_manifest["pair_actions"].append(
                     {
                         "pair_id": identity.pair_id,

@@ -2181,6 +2181,7 @@ class PairExecutor:
         decision_path = match_root / "decisions.jsonl"
         request_path = match_root / "analysis_requests.jsonl"
         result_path = match_root / "analysis_results.jsonl"
+        _create_empty_file_durable(decision_path)
         _create_empty_file_durable(request_path)
         _create_empty_file_durable(result_path)
         decisions = 0
@@ -2215,7 +2216,7 @@ class PairExecutor:
                 dice.expected_next_roll_seat,
                 (0, 0),
             )
-            with decision_path.open("w", encoding="utf-8", newline="") as evidence:
+            with decision_path.open("a", encoding="utf-8", newline="") as evidence:
                 while True:
                     gnuid = _gnuid(board_text)
                     position = self.engine_kit.position_from_gnuid(gnuid)

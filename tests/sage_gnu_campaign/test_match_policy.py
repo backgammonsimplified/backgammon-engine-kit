@@ -987,6 +987,7 @@ def test_analysis_journal_paths_are_directory_durable_before_board_start(
 
     class StopBeforeBoardStart:
         def __init__(self, *_: object) -> None:
+            assert (side_a / "decisions.jsonl").read_bytes() == b""
             assert (side_a / "analysis_requests.jsonl").read_bytes() == b""
             assert (side_a / "analysis_results.jsonl").read_bytes() == b""
             assert side_b.is_dir()
@@ -1007,6 +1008,8 @@ def test_analysis_journal_paths_are_directory_durable_before_board_start(
                 ("directory", matches),
                 ("directory", side_b),
                 ("directory", matches),
+                ("file", side_a / "decisions.jsonl"),
+                ("directory", side_a),
                 ("file", side_a / "analysis_requests.jsonl"),
                 ("directory", side_a),
                 ("file", side_a / "analysis_results.jsonl"),
@@ -1018,6 +1021,72 @@ def test_analysis_journal_paths_are_directory_durable_before_board_start(
     monkeypatch.setattr(match_module, "GnuBoardProcess", StopBeforeBoardStart)
     with pytest.raises(RuntimeError, match="stop before board start"):
         PairExecutor(config, FakeEngineKit()).run(pair_identity(config, 1), workspace)
+
+
+def test_decision_journal_parent_fsync_failure_prevents_board_or_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import runner.sage_gnu_campaign.match as match_module
+
+    match_root = tmp_path / "match-A"
+    board_started = False
+
+    class BoardMustNotStart:
+        def __init__(self, *_: object) -> None:
+            nonlocal board_started
+            board_started = True
+            raise AssertionError("board started before decisions.jsonl was directory-durable")
+
+    real_fsync_directory = match_module.fsync_directory
+
+    def fail_decision_parent(path: Path) -> None:
+        resolved = Path(path)
+        if (
+            resolved == match_root
+            and (match_root / "decisions.jsonl").exists()
+            and not (match_root / "analysis_requests.jsonl").exists()
+        ):
+            raise OSError("simulated decisions parent fsync crash window")
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(match_module, "SeatDiceController", FakeDice)
+    monkeypatch.setattr(match_module, "GnuBoardProcess", BoardMustNotStart)
+    monkeypatch.setattr(match_module, "fsync_directory", fail_decision_parent)
+    with pytest.raises(OSError, match="decisions parent fsync"):
+        PairExecutor(load_campaign_config(CONFIG), FakeEngineKit())._run_match(
+            pair_identity(load_campaign_config(CONFIG), 1), "A", match_root
+        )
+    assert not board_started
+    assert (match_root / "decisions.jsonl").is_file()
+    assert not (match_root / "analysis_requests.jsonl").exists()
+
+
+def test_decision_journal_creation_and_append_have_exact_fsync_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import runner.sage_gnu_campaign.match as match_module
+
+    path = tmp_path / "decisions.jsonl"
+    events: list[tuple[str, Path]] = []
+    real_fsync = match_module.os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        kind = "directory" if stat.S_ISDIR(match_module.os.fstat(descriptor).st_mode) else "file"
+        events.append((kind, Path(match_module.os.readlink(f"/proc/self/fd/{descriptor}"))))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(match_module.os, "fsync", recording_fsync)
+    match_module._create_empty_file_durable(path)
+    match_module._append_jsonl_durable(path, {"record_ordinal": 1})
+    assert events == [
+        ("file", path),
+        ("directory", tmp_path),
+        ("file", path),
+    ]
+    assert json.loads(path.read_text(encoding="utf-8"))["record_ordinal"] == 1
+    with pytest.raises(FileExistsError):
+        match_module._create_empty_file_durable(path)
+    assert json.loads(path.read_text(encoding="utf-8"))["record_ordinal"] == 1
 
 
 def test_gnu_command_errors_fail_closed() -> None:

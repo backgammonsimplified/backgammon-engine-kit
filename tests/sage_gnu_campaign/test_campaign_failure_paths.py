@@ -94,6 +94,96 @@ class ExecutorMustNotRun:
         raise AssertionError(f"committed pair was unexpectedly re-executed: {identity.pair_id}")
 
 
+@pytest.mark.parametrize("stage", ["before-synchronization", "during-synchronization"])
+def test_final_manifest_write_interrupt_never_removes_live_run_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    primary = KeyboardInterrupt(f"interrupt-{stage}")
+    action = {
+        "pair_id": "pair-01",
+        "action": "committed",
+        "marker_sha256": "a" * 64,
+    }
+    manifest = {
+        "campaign_id": "campaign-test",
+        "run_id": "run-test",
+        "state": "started",
+        "state_transition_timestamps": [
+            {"from": None, "to": "started", "at_utc": "before", "reason": "test"}
+        ],
+        "planned_pairs": [{"pair_id": "pair-01", "base_seed": "seed-01"}],
+        "pair_actions": [action],
+        "output_file_sha256": {},
+    }
+
+    def interrupt_synchronization(live, finalized):
+        assert json.loads((tmp_path / "run.json").read_text()) == finalized
+        assert live["run_id"] == "run-test"
+        assert live["campaign_id"] == "campaign-test"
+        assert live["pair_actions"] == [action]
+        assert live["planned_pairs"] == [
+            {"pair_id": "pair-01", "base_seed": "seed-01"}
+        ]
+        if stage == "during-synchronization":
+            live["state"] = finalized["state"]
+        raise primary
+
+    monkeypatch.setattr(
+        campaign_module, "_synchronize_run_manifest", interrupt_synchronization
+    )
+    with pytest.raises(KeyboardInterrupt) as caught:
+        campaign_module._finalize_run_manifest(
+            tmp_path / "run.json", manifest, "complete", "test-complete"
+        )
+    assert caught.value is primary
+    assert manifest["run_id"] == "run-test"
+    assert manifest["campaign_id"] == "campaign-test"
+    assert manifest["pair_actions"] == [action]
+    assert manifest["planned_pairs"][0]["base_seed"] == "seed-01"
+
+    evidence = campaign_module._persist_run_interruption(
+        tmp_path, manifest, primary, (), {"status": "pass"}
+    )
+    assert json.loads((tmp_path / evidence["path"]).read_text())[
+        "exception_type"
+    ] == "KeyboardInterrupt"
+
+
+def test_normal_run_manifest_finalization_preserves_identity_and_matches_disk(
+    tmp_path: Path,
+) -> None:
+    action = {
+        "pair_id": "pair-01",
+        "action": "committed",
+        "marker_sha256": "b" * 64,
+    }
+    manifest = {
+        "campaign_id": "campaign-test",
+        "run_id": "run-test",
+        "state": "started",
+        "stop_reason": "stale-stop-reason",
+        "state_transition_timestamps": [
+            {"from": None, "to": "started", "at_utc": "before", "reason": "test"}
+        ],
+        "planned_pairs": [{"pair_id": "pair-01", "base_seed": "seed-01"}],
+        "pair_actions": [action],
+        "output_file_sha256": {"stale-pair": "stale-marker"},
+    }
+    original_identity = id(manifest)
+
+    result = campaign_module._finalize_run_manifest(
+        tmp_path / "run.json", manifest, "complete", "test-complete"
+    )
+
+    assert result is manifest
+    assert id(result) == original_identity
+    assert result == json.loads((tmp_path / "run.json").read_text())
+    assert result["state"] == "complete"
+    assert result["stop_reason"] == "test-complete"
+    assert result["output_file_sha256"] == {"pair-01": "b" * 64}
+    assert "stale-pair" not in result["output_file_sha256"]
+
+
 def test_pair_failure_persists_failed_run_and_forensics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = load_campaign_config(CONFIG)
     monkeypatch.setattr(campaign_module, "preflight", lambda *a, **k: report(config))
@@ -329,6 +419,8 @@ def test_forensic_persistence_failure_does_not_mask_primary_match_failure(
         ("after-durable-publication", True),
         ("during-ledger-commit", True),
         ("before-run-finalization", True),
+        ("after-durable-final-manifest-write", True),
+        ("during-in-memory-manifest-synchronization", True),
     ],
 )
 def test_keyboard_interrupt_is_preserved_across_publication_and_ledger_windows(
@@ -387,6 +479,28 @@ def test_keyboard_interrupt_is_preserved_across_publication_and_ledger_windows(
             return real_transition(self, pair_id, target, **kwargs)
 
         monkeypatch.setattr(CampaignLedger, "transition", interrupt_ledger)
+    elif stage in {
+        "after-durable-final-manifest-write",
+        "during-in-memory-manifest-synchronization",
+    }:
+        real_synchronize = campaign_module._synchronize_run_manifest
+
+        def interrupt_synchronization(manifest, finalized):
+            nonlocal fired
+            if finalized["stop_reason"] == "operator-max-new-pairs" and not fired:
+                assert manifest["run_id"]
+                assert manifest["campaign_id"] == config.campaign_id
+                assert manifest["pair_actions"][-1]["action"] == "committed"
+                assert manifest["planned_pairs"][0]["pair_id"] == identity.pair_id
+                if stage == "during-in-memory-manifest-synchronization":
+                    manifest["state"] = finalized["state"]
+                fired = True
+                raise primary
+            real_synchronize(manifest, finalized)
+
+        monkeypatch.setattr(
+            campaign_module, "_synchronize_run_manifest", interrupt_synchronization
+        )
     else:
         real_finalize = campaign_module._finalize_run_manifest
 
@@ -596,7 +710,14 @@ def test_interrupt_recovery_retries_visible_ledger_parent_durability(
 
 @pytest.mark.parametrize(
     "stage",
-    ["immediately-before", "during-temp-write", "after-replace", "no-active-pair"],
+    [
+        "immediately-before",
+        "during-temp-write",
+        "after-replace",
+        "after-durable-final-manifest-write",
+        "during-in-memory-manifest-synchronization",
+        "no-active-pair",
+    ],
 )
 def test_campaign_bound_finalization_interrupt_is_run_level_and_restartable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
@@ -687,7 +808,7 @@ def test_campaign_bound_finalization_interrupt_is_run_level_and_restartable(
             real_fsync(descriptor)
 
         monkeypatch.setattr(manifests_module.os, "fsync", interrupt_run_temp_fsync)
-    else:
+    elif stage == "after-replace":
         real_fsync_directory = manifests_module.fsync_directory
 
         def interrupt_after_run_replace(path: Path) -> None:
@@ -704,6 +825,26 @@ def test_campaign_bound_finalization_interrupt_is_run_level_and_restartable(
             real_fsync_directory(path)
 
         monkeypatch.setattr(manifests_module, "fsync_directory", interrupt_after_run_replace)
+    else:
+        real_synchronize = campaign_module._synchronize_run_manifest
+
+        def interrupt_synchronization(manifest, finalized):
+            nonlocal fired
+            if finalized["stop_reason"] == "campaign-bound-reached" and not fired:
+                assert all_committed()
+                assert manifest["run_id"]
+                assert manifest["campaign_id"] == config.campaign_id
+                assert len(manifest["pair_actions"]) == 10
+                assert len(manifest["planned_pairs"]) == 10
+                if stage == "during-in-memory-manifest-synchronization":
+                    manifest["state"] = finalized["state"]
+                fired = True
+                raise primary
+            real_synchronize(manifest, finalized)
+
+        monkeypatch.setattr(
+            campaign_module, "_synchronize_run_manifest", interrupt_synchronization
+        )
 
     try:
         unexpected = run_campaign(

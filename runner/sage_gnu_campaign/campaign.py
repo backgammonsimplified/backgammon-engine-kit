@@ -454,6 +454,13 @@ def _persist_attempt_failure_preserving_primary(
         }
 
 
+def _synchronize_run_manifest(
+    manifest: dict[str, Any], finalized: Mapping[str, Any]
+) -> None:
+    """Apply finalized values without removing live run identity or context."""
+    manifest.update(finalized)
+
+
 def _finalize_run_manifest(path: Path, manifest: dict[str, Any], state: str, stop_reason: str) -> dict[str, Any]:
     finalized = {
         **manifest,
@@ -471,8 +478,7 @@ def _finalize_run_manifest(path: Path, manifest: dict[str, Any], state: str, sto
         and action.get("marker_sha256")
     }
     write_json(path, finalized)
-    manifest.clear()
-    manifest.update(finalized)
+    _synchronize_run_manifest(manifest, finalized)
     return manifest
 
 

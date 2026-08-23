@@ -549,6 +549,145 @@ def test_publication_requires_authoritative_analysis_journals(
 
 
 @pytest.mark.parametrize(
+    "case",
+    [
+        "checker-recommendation",
+        "no-double-result-for-double",
+        "double-result-for-roll",
+        "take-result-for-pass",
+        "pass-result-for-take",
+    ],
+)
+def test_publication_binds_command_to_authoritative_analysis(
+    tmp_path: Path, case: str,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    if case == "take-result-for-pass":
+        write_execution_fixture(
+            execution, identity, games=[("O", 1)] * 7, terminal_kinds=["drop"] * 7
+        )
+    else:
+        write_execution_fixture(execution, identity)
+    match = execution / "matches/A"
+    decision_path = match / "decisions.jsonl"
+    result_path = match / "analysis_results.jsonl"
+    decisions = [json.loads(line) for line in decision_path.read_text().splitlines()]
+    results = [json.loads(line) for line in result_path.read_text().splitlines()]
+    target_command = {
+        "no-double-result-for-double": "double",
+        "double-result-for-roll": "roll",
+        "take-result-for-pass": "pass",
+        "pass-result-for-take": "take",
+    }.get(case)
+    command = next(
+        item for item in decisions
+        if item["decision_type"] == "checker"
+        if case == "checker-recommendation"
+    ) if target_command is None else next(
+        item for item in decisions if item["command"] == target_command
+    )
+    result = next(
+        item for item in results
+        if item["decision_ordinal"] == command["decision_ordinal"]
+    )
+    raw = result["returned_result"]
+    validated = command["engine_kit_result"]
+    if case == "checker-recommendation":
+        raw["checker_decision"]["candidates"][0]["notation"] = "24/18"
+    elif case == "no-double-result-for-double":
+        raw["cube_decision"]["recommended_action_id"] = "no-double"
+    elif case == "double-result-for-roll":
+        raw["cube_decision"]["recommended_action_id"] = "double-take"
+    else:
+        take, passed = ((0.2, 0.8) if case == "take-result-for-pass" else (0.8, 0.2))
+        for action in raw["cube_decision"]["actions"]:
+            if action["action_id"] == "double-take":
+                action["equity"] = take
+            elif action["action_id"] == "double-pass":
+                action["equity"] = passed
+    validated[f"{command['decision_type']}_decision"] = raw[
+        f"{command['decision_type']}_decision"
+    ]
+    decision_path.write_text(
+        "".join(json.dumps(item, sort_keys=True) + "\n" for item in decisions),
+        encoding="utf-8",
+    )
+    result_path.write_text(
+        "".join(json.dumps(item, sort_keys=True) + "\n" for item in results),
+        encoding="utf-8",
+    )
+    manifest_path = match / "match_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for path in (decision_path, result_path):
+        manifest["output_sha256"][str(path.relative_to(match))] = hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+    write_json(manifest_path, manifest)
+
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    with pytest.raises(MatchExecutionError, match="authoritative analysis"):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
+
+
+def test_publication_accepts_semantically_identical_checker_formatting(
+    tmp_path: Path,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    write_execution_fixture(execution, identity)
+    match = execution / "matches/A"
+    decision_path = match / "decisions.jsonl"
+    result_path = match / "analysis_results.jsonl"
+    decisions = [json.loads(line) for line in decision_path.read_text().splitlines()]
+    results = [json.loads(line) for line in result_path.read_text().splitlines()]
+    decision = next(item for item in decisions if item["decision_type"] == "checker")
+    result = next(
+        item for item in results
+        if item["decision_ordinal"] == decision["decision_ordinal"]
+    )
+    raw = result["returned_result"]
+    notation = raw["checker_decision"]["candidates"][0]["notation"]
+    raw["checker_decision"]["candidates"][0]["notation"] = notation + "*"
+    decision["engine_kit_result"]["checker_decision"] = raw["checker_decision"]
+    decision_path.write_text(
+        "".join(json.dumps(item, sort_keys=True) + "\n" for item in decisions),
+        encoding="utf-8",
+    )
+    result_path.write_text(
+        "".join(json.dumps(item, sort_keys=True) + "\n" for item in results),
+        encoding="utf-8",
+    )
+    manifest_path = match / "match_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for path in (decision_path, result_path):
+        manifest["output_sha256"][str(path.relative_to(match))] = hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+    write_json(manifest_path, manifest)
+    execution_result_path = execution / "execution_result.json"
+    execution_result = json.loads(execution_result_path.read_text())
+    execution_result["matches"] = [
+        manifest if item["side"] == "A" else item
+        for item in execution_result["matches"]
+    ]
+    write_json(execution_result_path, execution_result)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+
+    publish_pair(
+        execution, artifact_root, config, identity, publication_common(),
+        {"attempt_count": 1, "transitions": []},
+    )
+
+
+@pytest.mark.parametrize(
     "substitution", ["physical-seat", "engine", "stream", "roll-index", "cross-side"],
 )
 def test_publication_rejects_equal_dice_collision_identity_substitution(

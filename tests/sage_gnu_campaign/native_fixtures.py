@@ -712,9 +712,24 @@ def write_complete_match(
             checker_decision, cube_decision = decision_result, None
             candidate_actuals: list[int] | None = [actual_ply]
         else:
+            command = decision["command"]
+            if command in {"take", "pass"}:
+                take_equity, pass_equity = (
+                    (0.2, 0.8) if command == "take" else (0.8, 0.2)
+                )
+                recommended = "double-take"
+            else:
+                take_equity, pass_equity = 0.2, 0.8
+                recommended = "no-double" if command == "roll" else "double-take"
             decision_result = {
                 "actual_ply": actual_ply,
-                "recommendation": decision["command"],
+                "recommendation": command,
+                "recommended_action_id": recommended,
+                "actions": [
+                    {"action_id": "no-double", "equity": 0.1},
+                    {"action_id": "double-take", "equity": take_equity},
+                    {"action_id": "double-pass", "equity": pass_equity},
+                ],
             }
             checker_decision, cube_decision = None, decision_result
             candidate_actuals = None

@@ -1733,6 +1733,33 @@ def _validate_publication_analysis(
             candidate_actuals = [candidate.get("actual_ply") for candidate in candidates]
         elif not isinstance(decision_evidence.get("recommendation"), str):
             raise MatchExecutionError("cube analysis result is malformed")
+        try:
+            pre_position = _decode_publication_gnuid(str(decision["gnuid"]))
+            selected_command = derive_engine_command(
+                pre_position, validated, str(decision_type)
+            )
+            published_command = decision.get("command")
+            if decision_type == "checker":
+                if (
+                    not isinstance(published_command, str)
+                    or _simulate_checker_move(
+                        pre_position, str(seat), selected_command
+                    )
+                    != _simulate_checker_move(
+                        pre_position, str(seat), published_command
+                    )
+                ):
+                    raise MatchExecutionError(
+                        "published checker command differs from authoritative analysis"
+                    )
+            elif published_command != selected_command:
+                raise MatchExecutionError(
+                    "published cube command differs from authoritative analysis"
+                )
+        except MatchExecutionError as exc:
+            raise MatchExecutionError(
+                "published command is not selected by authoritative analysis"
+            ) from exc
         configured_ply = int(expected_target.removesuffix("ply"))
         expected_depth = {
             "configured_target": expected_target,
@@ -2602,6 +2629,27 @@ def pre_roll_cube_action(cube_decision: Mapping[str, Any]) -> str:
     raise MatchExecutionError("unsupported normal-match pre-roll cube recommendation")
 
 
+def derive_engine_command(
+    position: Any, result: Mapping[str, Any], decision_type: str,
+) -> str:
+    """Apply the single live/publication command-selection policy."""
+    if decision_type == "checker":
+        return _recommended_checker_notation(dict(result))
+    if decision_type != "cube":
+        raise MatchExecutionError("unsupported Engine Kit decision type")
+    try:
+        cube_decision = result["cube_decision"]
+        pending = position.cube.pending_action.type
+        dice = position.state.dice
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise MatchExecutionError("Engine Kit cube recommendation is malformed") from exc
+    if pending == "double":
+        return pending_double_response(cube_decision)
+    if pending == "none" and dice is None:
+        return pre_roll_cube_action(cube_decision)
+    raise MatchExecutionError("cube analysis does not match the recorded pre-command state")
+
+
 class PairExecutor:
     def __init__(self, config: CampaignConfig, engine_kit: EngineKitSession):
         self.config = config
@@ -2888,7 +2936,7 @@ class PairExecutor:
                             decisions,
                         )
                         try:
-                            command = pending_double_response(record["cube_decision"])
+                            command = derive_engine_command(position, record, decision_type)
                         except BaseException as exc:
                             self._persist_policy_failure(match_root, analysis_context, record, exc)
                             raise
@@ -2906,7 +2954,7 @@ class PairExecutor:
                             decisions,
                         )
                         try:
-                            command = pre_roll_cube_action(record["cube_decision"])
+                            command = derive_engine_command(position, record, decision_type)
                         except BaseException as exc:
                             self._persist_policy_failure(match_root, analysis_context, record, exc)
                             raise
@@ -2921,7 +2969,7 @@ class PairExecutor:
                             decisions,
                         )
                         try:
-                            command = _recommended_checker_notation(record)
+                            command = derive_engine_command(position, record, decision_type)
                         except BaseException as exc:
                             self._persist_policy_failure(match_root, analysis_context, record, exc)
                             raise

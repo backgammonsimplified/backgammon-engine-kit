@@ -36,7 +36,7 @@ ENGINE_KIT_COMMIT = "833929ea72ccec058527f3cd1fa0b54a07ac666b"
 
 def _rewrite_match_id(
     gnuid: str, *, score_delta: tuple[int, int] = (0, 0), match_length: int | None = None,
-    game_state_code: int | None = None,
+    game_state_code: int | None = None, crawford: bool | None = None,
 ) -> str:
     position_id, match_id = gnuid.split(":")
     data = bytearray(base64.b64decode(match_id + "=" * (-len(match_id) % 4)))
@@ -58,6 +58,8 @@ def _rewrite_match_id(
     set_bits(51, 15, get_bits(51, 15) + score_delta[1])
     if game_state_code is not None:
         set_bits(8, 3, game_state_code)
+    if crawford is not None:
+        set_bits(7, 1, int(crawford))
     encoded = base64.b64encode(bytes(data)).decode("ascii").rstrip("=")
     return f"{position_id}:{encoded}"
 
@@ -80,6 +82,19 @@ def _shift_all_gnuids(value, delta: tuple[int, int]):
         if len(position_id) == 14 and len(match_id) == 12:
             return _rewrite_match_id(value, score_delta=delta)
     return value
+
+
+def _rewrite_journal_files(match: Path, records_by_name: dict[str, list[dict]]) -> None:
+    manifest_path = match / "match_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for name, records in records_by_name.items():
+        path = match / name
+        path.write_text(
+            "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        manifest["output_sha256"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    write_json(manifest_path, manifest)
 
 
 class Clock:
@@ -570,7 +585,9 @@ def test_publication_rejects_wrong_exact_gnu_terminal_state_code(
     execution = tmp_path / "execution"
     if terminal_kind == "drop":
         write_execution_fixture(
-            execution, identity, games=[("O", 1)] * 7, terminal_kinds=["drop"] * 7
+            execution, identity,
+            games=[("O", 6), ("X", 1), ("O", 1)],
+            terminal_kinds=["resignation", "ordinary_game_over", "drop"],
         )
     elif terminal_kind == "resignation":
         write_execution_fixture(
@@ -604,6 +621,129 @@ def test_publication_rejects_wrong_exact_gnu_terminal_state_code(
             execution, artifact_root, config, identity, publication_common(),
             {"attempt_count": 1, "transitions": []},
         )
+
+
+def _crawford_execution(execution: Path, identity) -> None:
+    write_execution_fixture(
+        execution,
+        identity,
+        games=[("O", 6), ("X", 1), ("O", 1)],
+        terminal_kinds=["resignation", "ordinary_game_over", "drop"],
+    )
+
+
+def test_publication_rejects_gnuid_crawford_bit_flip_mid_game(tmp_path: Path) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    _crawford_execution(execution, identity)
+    match = execution / "matches/A"
+    records_by_name = {
+        name: [json.loads(line) for line in (match / name).read_text().splitlines()]
+        for name in ("decisions.jsonl", "analysis_requests.jsonl", "analysis_results.jsonl")
+    }
+    target = next(
+        record for record in records_by_name["decisions.jsonl"]
+        if record["game_number"] == 1
+        and record["transition_evidence"]["terminal_event"] is None
+    )
+    old = target["transition_evidence"]["post_command"]["gnuid"]
+    new = _rewrite_match_id(old, crawford=True)
+    records_by_name = {
+        name: _replace_gnuid(records, old, new)
+        for name, records in records_by_name.items()
+    }
+    _rewrite_journal_files(match, records_by_name)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    with pytest.raises(MatchExecutionError, match="Crawford bit"):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
+
+
+def test_publication_rejects_wrong_crawford_next_game_opening_bit(tmp_path: Path) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    _crawford_execution(execution, identity)
+    match = execution / "matches/A"
+    records_by_name = {
+        name: [json.loads(line) for line in (match / name).read_text().splitlines()]
+        for name in ("decisions.jsonl", "analysis_requests.jsonl", "analysis_results.jsonl")
+    }
+    terminal = next(
+        record for record in records_by_name["decisions.jsonl"]
+        if record["game_number"] == 1
+        and record["transition_evidence"]["terminal_event"] is not None
+    )
+    old = terminal["transition_evidence"]["post_command"]["gnuid"]
+    new = _rewrite_match_id(old, crawford=False)
+    records_by_name = {
+        name: _replace_gnuid(records, old, new)
+        for name, records in records_by_name.items()
+    }
+    _rewrite_journal_files(match, records_by_name)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    with pytest.raises(MatchExecutionError, match="Crawford bit"):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
+
+
+def test_publication_rejects_cube_analysis_evidence_during_crawford(tmp_path: Path) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    _crawford_execution(execution, identity)
+    match = execution / "matches/A"
+    decisions = [
+        json.loads(line) for line in (match / "decisions.jsonl").read_text().splitlines()
+    ]
+    crawford_roll = next(
+        record for record in decisions
+        if record["game_number"] == 2 and record["command"] == "roll"
+    )
+    crawford_roll["decision_type"] = "cube"
+    crawford_roll["engine_kit_result"] = {
+        "status": "complete", "cube_decision": {"recommendation": "no-double"}
+    }
+    _rewrite_journal_files(match, {"decisions.jsonl": decisions})
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    with pytest.raises(MatchExecutionError, match="cube analysis|Crawford"):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
+
+
+def test_publication_accepts_post_crawford_cube_action(tmp_path: Path) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    _crawford_execution(execution, identity)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    marker_sha256 = publish_pair(
+        execution, artifact_root, config, identity, publication_common(),
+        {"attempt_count": 1, "transitions": []},
+    )
+    assert len(marker_sha256) == 64
+    decisions = [
+        json.loads(line)
+        for line in (
+            artifact_root / config.campaign_id / "pairs" / identity.pair_id
+            / "matches/A/decisions.jsonl"
+        ).read_text().splitlines()
+    ]
+    assert any(
+        record["game_number"] == 3 and record["command"] in {"double", "pass"}
+        for record in decisions
+    )
 
 
 @pytest.mark.parametrize(
@@ -742,7 +882,9 @@ def test_publication_binds_command_to_authoritative_analysis(
     execution = tmp_path / "execution"
     if case == "take-result-for-pass":
         write_execution_fixture(
-            execution, identity, games=[("O", 1)] * 7, terminal_kinds=["drop"] * 7
+            execution, identity,
+            games=[("O", 6), ("X", 1), ("O", 1)],
+            terminal_kinds=["resignation", "ordinary_game_over", "drop"],
         )
     else:
         write_execution_fixture(execution, identity)

@@ -18,6 +18,7 @@ from runner.sage_gnu_campaign.match import (
     PairExecutor,
     _board_environment,
     _board_snapshot,
+    _expected_crawford_game,
     _frozen_gnu_sgf_application,
     _parse_terminal_event,
     _raise_on_gnu_error,
@@ -27,6 +28,7 @@ from runner.sage_gnu_campaign.match import (
     _validate_opening_transition,
     _recommended_checker_notation,
     canonical_gnu_dice,
+    derive_engine_command,
     pending_double_response,
     pre_roll_cube_action,
 )
@@ -238,6 +240,71 @@ def test_pre_roll_cube_and_checker_policy_is_explicit() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("score", "played", "expected"),
+    [
+        ((0, 0), False, False),
+        ((6, 0), False, True),
+        ((0, 6), False, True),
+        ((6, 1), True, False),
+    ],
+)
+def test_standard_crawford_schedule_is_derived_from_absolute_score_history(
+    score: tuple[int, int], played: bool, expected: bool,
+) -> None:
+    assert _expected_crawford_game(score, played) is expected
+
+
+def test_cube_analysis_policy_refuses_crawford_even_for_no_double() -> None:
+    crawford = position(6, "player_0", "none", None, crawford=True)
+    with pytest.raises(MatchExecutionError, match="forbidden during Crawford"):
+        derive_engine_command(
+            crawford,
+            {"cube_decision": cube_decision(0.2, 0.8, "no-double")},
+            "cube",
+        )
+
+
+@pytest.mark.parametrize("command", ["double", "take", "pass"])
+def test_live_transition_rejects_every_crawford_cube_command(command: str) -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    if command == "double":
+        before = position(6, "player_0", "none", None, crawford=True)
+        after = position(
+            6, "player_1", "double", None, on_roll="player_0",
+            offerer="player_0", responder="player_1", offered_cube_value=2,
+            crawford=True,
+        )
+        seat, engine, next_roll = "O", "sage", "O"
+    else:
+        before = position(
+            6, "player_1", "double", None, on_roll="player_0",
+            offerer="player_0", responder="player_1", offered_cube_value=2,
+            crawford=True,
+        )
+        after = position(6, "player_0", "none", None, crawford=True)
+        seat, engine, next_roll = "X", "gnu", "O"
+    with pytest.raises(MatchExecutionError, match="Crawford"):
+        _validate_command_transition(
+            command, before, after, [], 2, seat, engine, mapping, next_roll, None,
+            expected_crawford=True,
+        )
+
+
+def test_post_crawford_double_transition_remains_legal() -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    before = position(6, "player_0", "none", None, crawford=False)
+    after = position(
+        6, "player_1", "double", None, on_roll="player_0",
+        offerer="player_0", responder="player_1", offered_cube_value=2,
+        crawford=False,
+    )
+    _validate_command_transition(
+        "double", before, after, [], 3, "O", "sage", mapping, "O", None,
+        expected_crawford=False,
+    )
+
+
 class FakeDice:
     def __init__(self, root: Path, **values: object):
         self.root = root
@@ -395,6 +462,7 @@ def position(
     cube_value: int = 1,
     cube_owner: str = "center",
     game_state: str = "playing",
+    crawford: bool = False,
 ) -> object:
     return SimpleNamespace(
         board=board,
@@ -416,6 +484,7 @@ def position(
                 resignation_multiplier=resignation_multiplier,
             ),
         ),
+        rules=SimpleNamespace(crawford=crawford),
     )
 
 
@@ -459,32 +528,33 @@ class FakeEngineKit:
         )
         self.position_values = [
                 position(0, "player_0", "none", (3, 1), board=first_game, cube_value=2),
-                position(6, "player_1", "none", (4, 1)),
-                position(6, "player_0", "none", None, board=x_moved),
-                position(6, "player_0", "none", (3, 1), board=x_moved),
-                position(6, "player_1", "none", None, board=both_moved),
+                position(6, "player_1", "none", (4, 1), crawford=True),
+                position(6, "player_0", "none", None, board=x_moved, crawford=True),
+                position(6, "player_0", "none", (3, 1), board=x_moved, crawford=True),
+                position(6, "player_1", "none", None, board=both_moved, crawford=True),
                 position(
                     6, "player_0", "double", None, board=both_moved,
                     on_roll="player_1", offerer="player_1", responder="player_0",
-                    offered_cube_value=2,
+                    offered_cube_value=2, crawford=True,
                 ),
                 position(
                     6, "player_1", "none", (2, 2), board=both_moved,
-                    cube_value=2, cube_owner="player_0",
+                    cube_value=2, cube_owner="player_0", crawford=True,
                 ),
                 position(
                     6, "player_0", "none", None, board=x_moved_again,
-                    cube_value=2, cube_owner="player_0",
+                    cube_value=2, cube_owner="player_0", crawford=True,
                 ),
                 position(
                     6, "player_1", "double", None, board=x_moved_again,
                     on_roll="player_0", offerer="player_0", responder="player_1",
                     offered_cube_value=4, cube_value=2, cube_owner="player_0",
+                    crawford=True,
                 ),
                 position(
                     8, None, "none", None, board=x_moved_again,
                     on_roll="player_0", cube_value=2, cube_owner="player_0",
-                    game_state="dropped",
+                    game_state="dropped", crawford=True,
                 ),
         ]
         self.positions = iter(self.position_values)
@@ -541,7 +611,7 @@ class FakeEngineKit:
         return returned.result
 
 
-def test_run_match_simulates_all_normal_policy_paths_without_board_evaluation(
+def test_run_match_refuses_cube_state_and_analysis_during_crawford(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import runner.sage_gnu_campaign.match as match_module
@@ -550,23 +620,16 @@ def test_run_match_simulates_all_normal_policy_paths_without_board_evaluation(
     monkeypatch.setattr(match_module, "GnuBoardProcess", FakeBoard)
     config = load_campaign_config(CONFIG)
     engine_kit = FakeEngineKit()
-    manifest = PairExecutor(config, engine_kit)._run_match(
-        pair_identity(config, 1),
-        "A",
-        tmp_path / "match-A",
-    )
-
-    assert manifest["side"] == "A"
+    with pytest.raises(MatchExecutionError, match="Crawford game contains cube-use state"):
+        PairExecutor(config, engine_kit)._run_match(
+            pair_identity(config, 1),
+            "A",
+            tmp_path / "match-A",
+        )
     assert engine_kit.analysis_calls == [
         ("sage", "checker"),
         ("gnu", "checker"),
-        ("sage", "cube"),
         ("sage", "checker"),
-        ("gnu", "cube"),
-        ("sage", "cube"),
-        ("gnu", "checker"),
-        ("sage", "cube"),
-        ("gnu", "cube"),
     ]
     assert FakeBoard.last is not None
     assert [command for command in FakeBoard.last.commands if command in {
@@ -576,11 +639,7 @@ def test_run_match_simulates_all_normal_policy_paths_without_board_evaluation(
         "13/9/8",
         "roll",
         "13/10/9",
-        "double",
-        "take",
-        "13/11/9/7/5",
-        "double",
-        "pass",
+        "roll",
     ]
     assert not any(
         command == "hint" or command.startswith("hint ") or command == "show evaluation"
@@ -601,13 +660,10 @@ def test_run_match_simulates_all_normal_policy_paths_without_board_evaluation(
     assert first_terminal["post_command"]["score"] == [6, 0]
     assert first_terminal["game_number"] == 1
     assert first_terminal["subsequent_opening_state"]["game_number"] == 2
-    final_terminal = decisions[-1]["transition_evidence"]
-    assert final_terminal["command_type"] == "pass"
-    assert final_terminal["terminal_event"] == terminal_event(
-        "drop", "O", 2, loser_seat="X"
+    assert all(
+        record["decision_type"] != "cube"
+        for record in decisions if record["game_number"] == 2
     )
-    assert final_terminal["post_command"]["score"] == [8, 0]
-    assert final_terminal["subsequent_opening_state"] is None
 
 
 @pytest.mark.parametrize(
@@ -673,7 +729,7 @@ def test_changed_gnuid_with_wrong_command_specific_state_fails_closed(
     ],
     ids=["correct-dice-wrong-physical-seat", "correct-dice-wrong-engine"],
 )
-def test_changed_gnuid_with_next_dice_bound_to_wrong_seat_or_engine_fails_closed(
+def test_crawford_live_path_never_reaches_pending_double_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     field: str,
@@ -690,10 +746,12 @@ def test_changed_gnuid_with_next_dice_bound_to_wrong_seat_or_engine_fails_closed
 
     monkeypatch.setattr(match_module, "SeatDiceController", FakeDice)
     monkeypatch.setattr(match_module, "GnuBoardProcess", WrongTakeDiceBoard)
-    with pytest.raises(MatchExecutionError, match="wrong game, physical seat, or engine"):
+    with pytest.raises(MatchExecutionError, match="Crawford game contains cube-use state"):
         PairExecutor(load_campaign_config(CONFIG), FakeEngineKit())._run_match(
             pair_identity(load_campaign_config(CONFIG), 1), "A", tmp_path / field
         )
+    assert FakeBoard.last is not None
+    assert "take" not in FakeBoard.last.commands
 
 
 def test_resignation_accept_requires_exact_score_cube_action_and_turn_state() -> None:
@@ -1314,6 +1372,79 @@ def native_pair(
 ) -> tuple[str, str]:
     sgf, text, _ = native_documents(engine_by_seat, games)
     return sgf, text
+
+
+@pytest.mark.parametrize(
+    ("games", "crawford_score"),
+    [([("O", 6), ("X", 1), ("O", 1)], [6, 0]),
+     ([("X", 6), ("O", 1), ("X", 1)], [0, 6])],
+    ids=["six-zero", "zero-six"],
+)
+def test_native_outputs_accept_exact_first_one_away_crawford_opening(
+    tmp_path: Path,
+    games: list[tuple[str, int]],
+    crawford_score: list[int],
+) -> None:
+    engines = {"O": "sage", "X": "gnu"}
+    sgf, text = native_pair(engines, games)
+    sgf_path = tmp_path / "match.sgf"
+    text_path = tmp_path / "match.txt"
+    sgf_path.write_text(sgf, encoding="utf-8")
+    text_path.write_text(text, encoding="utf-8")
+    summary = _validate_native_outputs(
+        sgf_path, text_path, engines, FROZEN_GNU_SGF_APPLICATION
+    )
+    crawford = summary["games"][1]
+    assert crawford["start_score"] == crawford_score
+    assert crawford["crawford_state"] == "crawford_game"
+    assert crawford["crawford_game"] is True
+    assert summary["games"][2]["crawford_state"] == "post_crawford"
+    assert summary["games"][2]["crawford_game"] is False
+
+
+@pytest.mark.parametrize(
+    ("games", "mutate"),
+    [
+        ([("O", 8)], lambda sgf: sgf.replace("RU[Crawford]", "RU[Crawford:CrawfordGame]", 1)),
+        ([("O", 6), ("X", 1), ("O", 1)], lambda sgf: sgf.replace("RU[Crawford:CrawfordGame]", "RU[Crawford]", 1)),
+        ([("O", 6), ("X", 1), ("O", 1)], lambda sgf: sgf.replace("RU[Crawford]", "RU[Crawford:CrawfordGame]", 1)),
+        ([("O", 6), ("X", 1), ("O", 1)], lambda sgf: sgf.rsplit("RU[Crawford]", 1)[0] + "RU[Crawford:CrawfordGame]" + sgf.rsplit("RU[Crawford]", 1)[1]),
+    ],
+    ids=["at-zero-zero", "missing-first-one-away", "before-one-away", "remains-post-crawford"],
+)
+def test_native_outputs_reject_wrong_crawford_schedule(
+    tmp_path: Path,
+    games: list[tuple[str, int]],
+    mutate: object,
+) -> None:
+    engines = {"O": "sage", "X": "gnu"}
+    sgf, text = native_pair(engines, games)
+    sgf_path = tmp_path / "match.sgf"
+    text_path = tmp_path / "match.txt"
+    sgf_path.write_text(mutate(sgf), encoding="utf-8")  # type: ignore[operator]
+    text_path.write_text(text, encoding="utf-8")
+    with pytest.raises(MatchExecutionError, match="Crawford game conflicts with score history"):
+        _validate_native_outputs(
+            sgf_path, text_path, engines, FROZEN_GNU_SGF_APPLICATION
+        )
+
+
+def test_native_outputs_reject_second_crawford_game(
+    tmp_path: Path,
+) -> None:
+    engines = {"O": "sage", "X": "gnu"}
+    sgf, text = native_pair(engines, [("O", 6), ("X", 1), ("O", 1)])
+    marker = "RU[Crawford]"
+    last = sgf.rfind(marker)
+    sgf = sgf[:last] + "RU[Crawford:CrawfordGame]" + sgf[last + len(marker):]
+    sgf_path = tmp_path / "match.sgf"
+    text_path = tmp_path / "match.txt"
+    sgf_path.write_text(sgf, encoding="utf-8")
+    text_path.write_text(text, encoding="utf-8")
+    with pytest.raises(MatchExecutionError, match="Crawford game conflicts with score history"):
+        _validate_native_outputs(
+            sgf_path, text_path, engines, FROZEN_GNU_SGF_APPLICATION
+        )
 
 
 @pytest.mark.parametrize(

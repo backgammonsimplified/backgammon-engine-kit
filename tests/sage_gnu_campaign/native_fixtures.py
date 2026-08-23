@@ -37,8 +37,10 @@ def _sgf_point(point: str, seat: str) -> str:
 
 def _game_actions(
     winner: str, points: int, *, seed: str | None = None, game_number: int = 1,
-    terminal_kind: str = "ordinary_game_over",
+    terminal_kind: str = "ordinary_game_over", crawford_game: bool = False,
 ) -> list[dict[str, Any]]:
+    if crawford_game and (terminal_kind == "drop" or points > 3):
+        raise ValueError("Crawford fixture result requires forbidden cube use")
     loser = "X" if winner == "O" else "O"
     if seed is not None:
         opening_index = 1
@@ -54,6 +56,8 @@ def _game_actions(
         cube_value = 1
         cube_owner = "center"
         if terminal_kind == "drop":
+            if crawford_game:
+                raise ValueError("Crawford fixture cannot end by cube drop")
             if points != 1:
                 raise ValueError("drop fixture currently requires one point")
             while current != winner:
@@ -65,7 +69,8 @@ def _game_actions(
             ])
         elif terminal_kind == "resignation":
             target_cube = next(
-                (cube for cube in (4, 2, 1) if points % cube == 0 and 1 <= points // cube <= 3),
+                (cube for cube in ((1,) if crawford_game else (4, 2, 1))
+                 if points % cube == 0 and 1 <= points // cube <= 3),
                 None,
             )
             if target_cube is None:
@@ -88,7 +93,8 @@ def _game_actions(
                 current = "X" if current == "O" else "O"
         elif terminal_kind == "ordinary_game_over":
             target_cube = next(
-                (cube for cube in (4, 2, 1) if points % cube == 0 and 1 <= points // cube <= 3),
+                (cube for cube in ((1,) if crawford_game else (4, 2, 1))
+                 if points % cube == 0 and 1 <= points // cube <= 3),
                 None,
             )
             if target_cube is None:
@@ -283,6 +289,7 @@ def native_documents(
     terminal_kinds: list[str] | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     score = [0, 0]
+    crawford_played = False
     sgf: list[str] = []
     text = ["7 point match\n"]
     summaries: list[dict[str, Any]] = []
@@ -293,8 +300,11 @@ def native_documents(
         o_name = f"{engine_by_seat['O']}_seat_O"
         x_name = f"{engine_by_seat['X']}_seat_X"
         terminal_kind = terminal_kinds[index]
+        crawford_game = not crawford_played and 6 in score
+        rules = "Crawford:CrawfordGame" if crawford_game else "Crawford"
         actions = _game_actions(
-            winner, points, seed=seed, game_number=index + 1, terminal_kind=terminal_kind,
+            winner, points, seed=seed, game_number=index + 1,
+            terminal_kind=terminal_kind, crawford_game=crawford_game,
         )
         setup_node = ""
         if seed is not None and terminal_kind == "ordinary_game_over":
@@ -313,7 +323,8 @@ def native_documents(
         sgf.append(
             f"(;FF[4]GM[6]AP[{FROZEN_GNU_SGF_APPLICATION}]"
             f"MI[length:7][game:{index}][ws:{score[0]}][bs:{score[1]}]"
-            f"PW[{o_name}]PB[{x_name}]RU[Crawford]RE[{'W' if winner == 'O' else 'B'}+{points}"
+            f"PW[{o_name}]PB[{x_name}]RU[{rules}]"
+            f"RE[{'W' if winner == 'O' else 'B'}+{points}"
             f"{'R' if terminal_kind == 'resignation' else ''}]"
             f"{setup_node}{''.join(_sgf_action(action) for action in actions)})\n"
         )
@@ -324,6 +335,8 @@ def native_documents(
         text.append(f"{'      ' if winner == 'O' else '                                  '}Wins {points} points\n")
         start_score = list(score)
         score[0 if winner == "O" else 1] += points
+        if crawford_game:
+            crawford_played = True
         summaries.append({"start_score": start_score, "post_score": list(score)})
     sgf_document = "".join(sgf)
     text_document = "".join(text)
@@ -363,7 +376,7 @@ def _encode_fixture_gnuid(state: dict[str, Any]) -> str:
     _set_bits(bits, 0, 4, int(math.log2(state["cube_value"])))
     _set_bits(bits, 4, 2, {"O": 0, "X": 1, "center": 3}[state["cube_owner"]])
     _set_bits(bits, 6, 1, 0 if on_roll == "O" else 1)
-    _set_bits(bits, 7, 1, 0)
+    _set_bits(bits, 7, 1, int(state.get("crawford", False)))
     _set_bits(bits, 8, 3, {
         "setup": 0, "playing": 1, "game_over_normal": 2,
         "resigned": 3, "dropped": 4,
@@ -460,6 +473,7 @@ def _next_opening_state(
         "players": _standard_players(), "on_roll": opener, "decision": opener,
         "dice": list(opening["dice"]), "cube_value": 1, "cube_owner": "center",
         "pending": {"type": "none"}, "score": list(score), "game_state": "playing",
+        "crawford": game["crawford_game"],
     }
 
 
@@ -554,7 +568,10 @@ def write_complete_match(
             "decision_type": decision_type, "analysis_dice": analysis_dice,
             "command": command,
             "engine_kit_result": (
-                {"status": "board-rule", "action": "accept-resignation"}
+                {
+                    "status": "board-rule",
+                    "action": "crawford-roll" if command == "roll" else "accept-resignation",
+                }
                 if decision_type == "board-rule" else {"status": "fixture"}
             ),
             "transition_evidence": {
@@ -583,7 +600,7 @@ def write_complete_match(
                 "players": players, "on_roll": opener, "decision": opener,
                 "dice": list(opening["dice"]), "cube_value": 1, "cube_owner": "center",
                 "pending": {"type": "none"}, "score": list(game["start_score"]),
-                "game_state": "playing",
+                "game_state": "playing", "crawford": game["crawford_game"],
             }
         for action_index, action in enumerate(actions):
             seat = action["physical_seat"]
@@ -591,7 +608,11 @@ def write_complete_match(
             if action_type == "checker" and action_index > 0:
                 rolled = copy.deepcopy(current)
                 rolled["dice"] = list(action["dice"])
-                append_decision(game, seat, "cube", "roll", "roll", current, rolled)
+                append_decision(
+                    game, seat,
+                    "board-rule" if game["crawford_game"] else "cube",
+                    "roll", "roll", current, rolled,
+                )
                 current = rolled
             before = copy.deepcopy(current)
             terminal = (

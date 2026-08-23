@@ -93,6 +93,39 @@ def canonical_gnu_dice(die1: int, die2: int) -> tuple[int, int]:
     return (die1, die2) if die1 >= die2 else (die2, die1)
 
 
+def _expected_crawford_game(
+    score: tuple[int, int] | list[int], crawford_played: bool, match_length: int = 7,
+) -> bool:
+    if (
+        len(score) != 2
+        or any(type(value) is not int or value < 0 for value in score)
+        or type(crawford_played) is not bool
+        or type(match_length) is not int
+        or match_length <= 1
+    ):
+        raise MatchExecutionError("Crawford scheduling authority is malformed")
+    if max(score) >= match_length:
+        return False
+    return not crawford_played and any(value == match_length - 1 for value in score)
+
+
+def _validate_crawford_position(position: Any, expected: bool, label: str) -> None:
+    try:
+        observed = position.rules.crawford
+        cube = _cube_snapshot(position)
+    except (AttributeError, TypeError) as exc:
+        raise MatchExecutionError(f"{label} Crawford/cube state is missing") from exc
+    if observed is not expected:
+        raise MatchExecutionError(f"{label} GNUID Crawford bit conflicts with score history")
+    if expected and (
+        cube[0] != 1
+        or cube[1] != "center"
+        or cube[2] == "double"
+        or cube[5] is not None
+    ):
+        raise MatchExecutionError(f"{label} Crawford game contains cube-use state")
+
+
 def _frozen_gnu_sgf_application(config: CampaignConfig) -> str:
     """Derive GNU's SGF AP identity from the verified frozen runtime identity."""
     runtime_version = config.data.get("engines", {}).get("gnu", {}).get(
@@ -622,6 +655,7 @@ def _parse_text_moves(value: str) -> list[list[str]]:
 
 def _validate_action_structure(
     actions: list[dict[str, Any]], winner_seat: str, points: int, terminal_kind: str,
+    *, crawford_game: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
     """Enrich and validate the linear normal-match action/cube state machine."""
     if not actions or actions[0].get("action") != "checker":
@@ -638,6 +672,8 @@ def _validate_action_structure(
         seat = action.get("physical_seat")
         if seat not in {"O", "X"} or seat != expected:
             raise MatchExecutionError("GNU native game action actor/order is invalid")
+        if crawford_game and kind in {"double", "take", "drop"}:
+            raise MatchExecutionError("GNU native Crawford game contains a cube action")
         event = {**action, "action_ordinal": ordinal, "cube_value_before": cube_value}
         if kind == "checker":
             if pending_doubler is not None:
@@ -704,6 +740,7 @@ def _parse_sgf_match(
 ) -> list[dict[str, Any]]:
     games: list[dict[str, Any]] = []
     score = [0, 0]
+    crawford_played = False
     expected_players = {
         "PW": f"{expected_engine_by_seat['O']}_seat_O",
         "PB": f"{expected_engine_by_seat['X']}_seat_X",
@@ -755,6 +792,9 @@ def _parse_sgf_match(
             or any(rule not in {"Crawford", "CrawfordGame"} for rule in rules)
         ):
             raise MatchExecutionError("GNU saved SGF rules conflict with frozen normal match play")
+        expected_crawford = _expected_crawford_game(score, crawford_played)
+        if ("CrawfordGame" in rules) is not expected_crawford:
+            raise MatchExecutionError("GNU saved SGF Crawford game conflicts with score history")
         action_nodes = nodes[1:]
         setup = _starting_sgf_setup()
         if action_nodes and set(action_nodes[0]) & SGF_SETUP_PROPERTIES:
@@ -771,7 +811,8 @@ def _parse_sgf_match(
             else "ordinary_game_over"
         )
         actions, result_level = _validate_action_structure(
-            actions, winner_seat, points, terminal_kind
+            actions, winner_seat, points, terminal_kind,
+            crawford_game=expected_crawford,
         )
         start_score = list(score)
         score[0 if winner_seat == "O" else 1] += points
@@ -779,6 +820,10 @@ def _parse_sgf_match(
             "game_number": index + 1,
             "players_by_physical_seat": dict(expected_engine_by_seat),
             "start_score": start_score,
+            "crawford_state": "crawford_game" if expected_crawford else (
+                "post_crawford" if crawford_played else "pre_crawford"
+            ),
+            "crawford_game": expected_crawford,
             "opening_state": {
                 "cube_value": 1,
                 "on_roll_physical_seat": actions[0]["physical_seat"],
@@ -805,6 +850,8 @@ def _parse_sgf_match(
             "points": points,
             "post_score": list(score),
         })
+        if expected_crawford:
+            crawford_played = True
     if max(score) < 7:
         raise MatchExecutionError("GNU saved SGF does not contain a complete seven-point match")
     return games
@@ -860,6 +907,7 @@ def _parse_text_match(value: str, expected_engine_by_seat: Mapping[str, str]) ->
         raise MatchExecutionError("GNU exported match text is empty or structurally invalid")
     expected_players = sorted((engine, seat) for seat, engine in expected_engine_by_seat.items())
     score = [0, 0]
+    crawford_played = False
     games: list[dict[str, Any]] = []
     accepted_identity_spans: list[tuple[int, int]] = []
     for index, header in enumerate(game_headers):
@@ -903,10 +951,12 @@ def _parse_text_match(value: str, expected_engine_by_seat: Mapping[str, str]) ->
         ):
             raise MatchExecutionError("GNU exported match text result column or ordering is ambiguous")
         winner_seat = min(distances, key=distances.get)
+        expected_crawford = _expected_crawford_game(score, crawford_played)
         actions = _parse_text_actions(block, player_columns)
         terminal_kind = "drop" if actions and actions[-1]["action"] == "drop" else "unspecified_completion"
         actions, result_level = _validate_action_structure(
-            actions, winner_seat, points, terminal_kind
+            actions, winner_seat, points, terminal_kind,
+            crawford_game=expected_crawford,
         )
         start_score = list(score)
         score[0 if winner_seat == "O" else 1] += points
@@ -914,6 +964,10 @@ def _parse_text_match(value: str, expected_engine_by_seat: Mapping[str, str]) ->
             "game_number": index + 1,
             "players_by_physical_seat": dict(expected_engine_by_seat),
             "start_score": start_score,
+            "crawford_state": "crawford_game" if expected_crawford else (
+                "post_crawford" if crawford_played else "pre_crawford"
+            ),
+            "crawford_game": expected_crawford,
             "opening_state": {
                 "cube_value": 1,
                 "on_roll_physical_seat": actions[0]["physical_seat"],
@@ -932,6 +986,8 @@ def _parse_text_match(value: str, expected_engine_by_seat: Mapping[str, str]) ->
             "points": points,
             "post_score": list(score),
         })
+        if expected_crawford:
+            crawford_played = True
     all_identity_spans = [(match.start(), match.end()) for match in TEXT_IDENTITY_RE.finditer(value)]
     if len(all_identity_spans) != len(accepted_identity_spans) or any(
         not any(start == accepted_start for accepted_start, _ in accepted_identity_spans)
@@ -1260,6 +1316,14 @@ def _validate_publication_decisions(
             raise MatchExecutionError(
                 "decision post-command GNUID score or match length conflicts with journal authority"
             )
+        expected_crawford = game.get("crawford_game")
+        if type(expected_crawford) is not bool:
+            raise MatchExecutionError("native Crawford scheduling authority is malformed")
+        _validate_crawford_position(
+            pre_position, expected_crawford, "decision pre-command"
+        )
+        if expected_crawford and record.get("decision_type") == "cube":
+            raise MatchExecutionError("cube analysis or decision evidence exists during Crawford game")
         if game_number not in validated_initial_states:
             sgf_state = game.get("sgf_state")
             if not isinstance(sgf_state, dict) or not isinstance(sgf_state.get("setup"), dict):
@@ -1284,12 +1348,20 @@ def _validate_publication_decisions(
                 )
                 or not isinstance(rules, dict)
                 or rules.get("crawford") is not True
-                or pre_position.rules.crawford != rules.get("crawford_game")
+                or rules.get("crawford_game") is not expected_crawford
             ):
                 raise MatchExecutionError("GNU SGF initial state conflicts with decision GNUID")
             validated_initial_states.add(game_number)
         event = transition.get("terminal_event")
         subsequent = transition.get("subsequent_opening_state")
+        post_crawford = expected_crawford
+        if event is not None and game_number < summary["game_count"]:
+            post_crawford = summary["games"][game_number].get("crawford_game")
+            if type(post_crawford) is not bool:
+                raise MatchExecutionError("next-game Crawford scheduling authority is malformed")
+        _validate_crawford_position(
+            post_position, post_crawford, "decision post-command"
+        )
         if event is None:
             if post.get("score") != game["start_score"] or subsequent is not None:
                 raise MatchExecutionError("non-terminal decision changes score or carries an opening")
@@ -1369,6 +1441,8 @@ def _validate_publication_decisions(
             str(command), pre_position, post_position, consumed, game_number, seat,
             expected_engine_by_seat[seat], expected_engine_by_seat,
             expected_next_roll_seat, event,
+            expected_crawford=expected_crawford,
+            expected_next_crawford=post_crawford,
         )
 
         automatic = transition.get("automatic_transition")
@@ -1406,7 +1480,15 @@ def _validate_publication_decisions(
                 "physical_seat": seat,
             })
         elif command_type == "roll":
-            if record.get("decision_type") != "cube" or record.get("analysis_dice") is not None:
+            expected_roll_type = "board-rule" if expected_crawford else "cube"
+            result = record.get("engine_kit_result")
+            if (
+                record.get("decision_type") != expected_roll_type
+                or record.get("analysis_dice") is not None
+                or expected_crawford and result != {
+                    "status": "board-rule", "action": "crawford-roll"
+                }
+            ):
                 raise MatchExecutionError("decision roll type/dice evidence is invalid")
         elif command_type == "accepted_resignation":
             if record.get("decision_type") != "board-rule" or record.get("analysis_dice") is not None:
@@ -1701,6 +1783,12 @@ def _validate_publication_analysis(
         ):
             raise MatchExecutionError("analysis journal ordering or decision association is invalid")
         previous_decision_ordinal = decision_ordinal
+        try:
+            analysis_position = _decode_publication_gnuid(str(decision.get("gnuid")))
+        except MatchExecutionError as exc:
+            raise MatchExecutionError("analysis request contains an invalid GNUID") from exc
+        if decision_type == "cube" and analysis_position.rules.crawford:
+            raise MatchExecutionError("cube analysis was requested during a Crawford game")
         raw = result.get("returned_result")
         validated = decision.get("engine_kit_result")
         if not isinstance(raw, dict) or not isinstance(validated, dict):
@@ -1844,6 +1932,7 @@ def _validate_opening_transition(
     engine_by_seat: Mapping[str, str],
     expected_next_roll_seat: str | None,
     expected_score: tuple[int, int],
+    expected_crawford: bool = False,
 ) -> str:
     if not consumed or len(consumed) % 2:
         raise MatchExecutionError("GNU opening prompt consumption is missing or incomplete")
@@ -1911,6 +2000,7 @@ def _validate_opening_transition(
         or _cube_snapshot(position) != (1, "center", "none", None, None, None, None)
     ):
         raise MatchExecutionError("GNU opening state is not the complete legal new-game state")
+    _validate_crawford_position(position, expected_crawford, "new-game opening")
     return winner
 
 
@@ -2383,6 +2473,9 @@ def _validate_command_transition(
     engine_by_seat: Mapping[str, str],
     expected_next_roll_seat: str | None,
     terminal_event: Mapping[str, Any] | None,
+    *,
+    expected_crawford: bool = False,
+    expected_next_crawford: bool = False,
 ) -> None:
     """Fail closed unless a changed GNU ID represents the commanded transition."""
     if (
@@ -2416,6 +2509,15 @@ def _validate_command_transition(
     )
     score_delta = (next_score[0] - previous_score[0], next_score[1] - previous_score[1])
     score_changed = score_delta != (0, 0)
+    _validate_crawford_position(position, expected_crawford, "GNU command pre-state")
+    next_is_new_game = score_changed and max(next_score[:2]) < next_score[2]
+    _validate_crawford_position(
+        next_position,
+        expected_next_crawford if next_is_new_game else expected_crawford,
+        "GNU command post-state",
+    )
+    if expected_crawford and command in {"double", "take", "pass"}:
+        raise MatchExecutionError("GNU cube command is forbidden during Crawford game")
     if score_changed != (terminal_event is not None):
         raise MatchExecutionError("GNU completed-game output/state transition is missing or misparsed")
 
@@ -2559,6 +2661,7 @@ def _validate_command_transition(
                 engine_by_seat,
                 expected_next_roll_seat,
                 next_score[:2],
+                expected_next_crawford,
             )
         return
 
@@ -2708,8 +2811,11 @@ def derive_engine_command(
         cube_decision = result["cube_decision"]
         pending = position.cube.pending_action.type
         dice = position.state.dice
+        crawford = position.rules.crawford
     except (KeyError, TypeError, AttributeError) as exc:
         raise MatchExecutionError("Engine Kit cube recommendation is malformed") from exc
+    if crawford:
+        raise MatchExecutionError("cube analysis/action is forbidden during Crawford game")
     if pending == "double":
         return pending_double_response(cube_decision)
     if pending == "none" and dice is None:
@@ -2944,6 +3050,7 @@ class PairExecutor:
         analysis_requests = 0
         game_action_ordinal = 0
         game_number = 1
+        crawford_played = False
         completed = False
         primary_error: BaseException | None = None
         dice_manifest: Path | None = None
@@ -2973,6 +3080,7 @@ class PairExecutor:
                 engine_by_seat,
                 dice.expected_next_roll_seat,
                 (0, 0),
+                False,
             )
             with decision_path.open("a", encoding="utf-8", newline="") as evidence:
                 while True:
@@ -2980,6 +3088,15 @@ class PairExecutor:
                     position = self.engine_kit.position_from_gnuid(gnuid)
                     if max(position.score.player_0, position.score.player_1) >= 7:
                         break
+                    current_score = (
+                        int(position.score.player_0), int(position.score.player_1)
+                    )
+                    expected_crawford = _expected_crawford_game(
+                        current_score, crawford_played
+                    )
+                    _validate_crawford_position(
+                        position, expected_crawford, "live decision"
+                    )
                     decisions += 1
                     if decisions > self.config.data["bounds"]["max_decisions_per_match"]:
                         raise MatchExecutionError("match exceeded committed decision safety bound")
@@ -2994,6 +3111,10 @@ class PairExecutor:
                         command = "accept"
                         record = {"status": "board-rule", "action": "accept-resignation"}
                     elif pending == "double":
+                        if expected_crawford:
+                            raise MatchExecutionError(
+                                "GNU exposed a pending double during Crawford game"
+                            )
                         decision_type = "cube"
                         analysis_requests += 1
                         record, analysis_context = self._analyze_with_forensics(
@@ -3012,19 +3133,25 @@ class PairExecutor:
                             f"unsupported pending action for normal seven-point match: {pending}"
                         )
                     elif dice_values is None:
-                        decision_type = "cube"
-                        analysis_requests += 1
-                        record, analysis_context = self._analyze_with_forensics(
-                            identity, side, match_root, game_number, physical_seat,
-                            engine, decision_type, gnuid, None,
-                            analysis_requests,
-                            decisions,
-                        )
-                        try:
-                            command = derive_engine_command(position, record, decision_type)
-                        except BaseException as exc:
-                            self._persist_policy_failure(match_root, analysis_context, record, exc)
-                            raise
+                        if expected_crawford:
+                            command = "roll"
+                            record = {
+                                "status": "board-rule", "action": "crawford-roll"
+                            }
+                        else:
+                            decision_type = "cube"
+                            analysis_requests += 1
+                            record, analysis_context = self._analyze_with_forensics(
+                                identity, side, match_root, game_number, physical_seat,
+                                engine, decision_type, gnuid, None,
+                                analysis_requests,
+                                decisions,
+                            )
+                            try:
+                                command = derive_engine_command(position, record, decision_type)
+                            except BaseException as exc:
+                                self._persist_policy_failure(match_root, analysis_context, record, exc)
+                                raise
                     else:
                         decision_type = "checker"
                         analysis_dice = tuple(int(value) for value in dice_values)
@@ -3073,6 +3200,11 @@ class PairExecutor:
                     next_position = self.engine_kit.position_from_gnuid(next_gnuid)
                     next_score = (int(next_position.score.player_0), int(next_position.score.player_1))
                     score_changed = next_score != previous_score
+                    expected_next_crawford = expected_crawford
+                    if score_changed and max(next_score) < 7:
+                        expected_next_crawford = _expected_crawford_game(
+                            next_score, crawford_played or expected_crawford
+                        )
                     terminal_event = _parse_terminal_event(output)
                     _validate_command_transition(
                         command,
@@ -3085,6 +3217,8 @@ class PairExecutor:
                         engine_by_seat,
                         dice.expected_next_roll_seat,
                         terminal_event,
+                        expected_crawford=expected_crawford,
+                        expected_next_crawford=expected_next_crawford,
                     )
                     opening_consumed = any(entry.get("prompt_type") == "opening" for entry in consumed)
                     subsequent_opening = None
@@ -3117,6 +3251,8 @@ class PairExecutor:
                     evidence.flush()
                     os.fsync(evidence.fileno())
                     if score_changed:
+                        if expected_crawford:
+                            crawford_played = True
                         if max(next_score) >= 7:
                             if opening_consumed:
                                 raise MatchExecutionError("GNU consumed an opening after the match was complete")
@@ -3129,6 +3265,7 @@ class PairExecutor:
                                 engine_by_seat,
                                 dice.expected_next_roll_seat,
                                 next_score,
+                                expected_next_crawford,
                             )
                             game_number = next_game_number
                             game_action_ordinal = 0

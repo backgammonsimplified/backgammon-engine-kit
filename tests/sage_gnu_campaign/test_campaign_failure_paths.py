@@ -74,6 +74,16 @@ class FailingExecutor:
         raise RuntimeError("malformed response")
 
 
+class SuccessfulFixtureExecutor:
+    def __init__(self, *_):
+        pass
+
+    def run(self, identity, workspace):
+        output = workspace / "pair-output"
+        write_execution_fixture(output, identity)
+        return output
+
+
 def test_pair_failure_persists_failed_run_and_forensics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = load_campaign_config(CONFIG)
     monkeypatch.setattr(campaign_module, "preflight", lambda *a, **k: report(config))
@@ -299,6 +309,143 @@ def test_forensic_persistence_failure_does_not_mask_primary_match_failure(
         "error_message": "secondary forensic storage failure",
     }
     assert any("secondary forensic storage failure" in note for note in primary.__notes__)
+
+
+@pytest.mark.parametrize(
+    ("stage", "published"),
+    [
+        ("before-final-rename", False),
+        ("after-final-rename", True),
+        ("after-durable-publication", True),
+        ("during-ledger-commit", True),
+        ("before-run-finalization", True),
+    ],
+)
+def test_keyboard_interrupt_is_preserved_across_publication_and_ledger_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, published: bool,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    monkeypatch.setattr(campaign_module, "preflight", lambda *a, **k: report(config))
+    monkeypatch.setattr(campaign_module, "EngineKitSession", lambda _: object())
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    destination = campaign_root(artifacts, config) / "pairs" / identity.pair_id
+    primary = KeyboardInterrupt(f"interrupt-{stage}")
+    fired = False
+
+    if stage == "before-final-rename":
+        real_replace = campaign_module.os.replace
+
+        def interrupt_before_replace(source, target):
+            nonlocal fired
+            if Path(target) == destination and not fired:
+                fired = True
+                raise primary
+            return real_replace(source, target)
+
+        monkeypatch.setattr(campaign_module.os, "replace", interrupt_before_replace)
+    elif stage == "after-final-rename":
+        real_fsync_directory = campaign_module.fsync_directory
+
+        def interrupt_after_replace(path: Path) -> None:
+            nonlocal fired
+            if Path(path) == destination.parent and destination.exists() and not fired:
+                fired = True
+                raise primary
+            real_fsync_directory(path)
+
+        monkeypatch.setattr(campaign_module, "fsync_directory", interrupt_after_replace)
+    elif stage == "after-durable-publication":
+        real_publish = campaign_module.publish_pair
+
+        def interrupt_after_publish(*args, **kwargs):
+            nonlocal fired
+            marker = real_publish(*args, **kwargs)
+            fired = True
+            raise primary
+
+        monkeypatch.setattr(campaign_module, "publish_pair", interrupt_after_publish)
+    elif stage == "during-ledger-commit":
+        real_transition = CampaignLedger.transition
+
+        def interrupt_ledger(self, pair_id, target, **kwargs):
+            nonlocal fired
+            if target == "committed" and not fired:
+                fired = True
+                raise primary
+            return real_transition(self, pair_id, target, **kwargs)
+
+        monkeypatch.setattr(CampaignLedger, "transition", interrupt_ledger)
+    else:
+        real_finalize = campaign_module._finalize_run_manifest
+
+        def interrupt_finalization(*args, **kwargs):
+            nonlocal fired
+            if not fired:
+                fired = True
+                raise primary
+            return real_finalize(*args, **kwargs)
+
+        monkeypatch.setattr(campaign_module, "_finalize_run_manifest", interrupt_finalization)
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        run_campaign(
+            config, REPO, tmp_path / "runtime", artifacts, ["runner", "run"],
+            max_new_pairs=1, executor_factory=SuccessfulFixtureExecutor,
+        )
+    assert caught.value is primary
+    assert fired
+    ledger = CampaignLedger(
+        campaign_root(artifacts, config) / "campaign_ledger.json"
+    ).load()["pairs"][identity.pair_id]
+    assert ledger["state"] == ("committed" if published else "started")
+    assert destination.exists() is published
+    if published:
+        marker = campaign_module.verify_committed_pair(
+            destination, config, identity, BENCH, KIT
+        )
+        assert ledger["committed_marker_sha256"] == marker
+    run_path = next((campaign_root(artifacts, config) / "runs").glob("run-*.json"))
+    run = json.loads(run_path.read_text())
+    assert run["state"] == "interrupted"
+    assert run["pair_actions"][-1]["action"] == (
+        "committed-interrupted" if published else "interrupted-incomplete"
+    )
+    failure_path = campaign_root(artifacts, config) / run["pair_actions"][-1]["failure"]["path"]
+    assert failure_path.is_file()
+    assert json.loads(failure_path.read_text())["exception_type"] == "KeyboardInterrupt"
+
+
+def test_interrupt_persistence_failure_never_replaces_keyboard_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    monkeypatch.setattr(campaign_module, "preflight", lambda *a, **k: report(config))
+    monkeypatch.setattr(campaign_module, "EngineKitSession", lambda _: object())
+    primary = KeyboardInterrupt("primary operator interrupt")
+
+    def interrupt_publication(*args, **kwargs):
+        raise primary
+
+    def fail_persistence(*args, **kwargs):
+        raise OSError("secondary interruption persistence failure")
+
+    monkeypatch.setattr(campaign_module, "publish_pair", interrupt_publication)
+    monkeypatch.setattr(campaign_module, "_persist_attempt_failure", fail_persistence)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    with pytest.raises(KeyboardInterrupt) as caught:
+        run_campaign(
+            config, REPO, tmp_path / "runtime", artifacts, ["runner", "run"],
+            max_new_pairs=1, executor_factory=SuccessfulFixtureExecutor,
+        )
+    assert caught.value is primary
+    assert any("secondary interruption persistence failure" in note for note in primary.__notes__)
+    run_path = next((campaign_root(artifacts, config) / "runs").glob("run-*.json"))
+    run = json.loads(run_path.read_text())
+    assert run["state"] == "interrupted"
+    assert run["pair_actions"][-1]["failure"]["status"] == "persistence-failed"
 
 
 def test_cli_returns_nonzero_for_failed_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:

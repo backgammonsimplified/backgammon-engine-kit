@@ -6,7 +6,7 @@ import os
 import shutil
 import traceback
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .config import CampaignConfig
 from .engine_kit import EngineKitSession
@@ -463,10 +463,97 @@ def _finalize_run_manifest(path: Path, manifest: dict[str, Any], state: str, sto
     manifest["output_file_sha256"] = {
         action["pair_id"]: action["marker_sha256"]
         for action in manifest["pair_actions"]
-        if action["action"] in {"committed", "verified-skip"} and action.get("marker_sha256")
+        if action["action"] in {"committed", "committed-interrupted", "verified-skip"}
+        and action.get("marker_sha256")
     }
     write_json(path, manifest)
     return manifest
+
+
+def _preserve_campaign_interrupt(
+    *,
+    root: Path,
+    config: CampaignConfig,
+    identity: PairIdentity,
+    attempt: int,
+    workspace: Path,
+    destination: Path,
+    ledger: CampaignLedger,
+    run_manifest_path: Path,
+    run_manifest: dict[str, Any],
+    report: Mapping[str, Any],
+    private_roots: tuple[Path, ...],
+    exc: KeyboardInterrupt,
+    phase: str,
+) -> None:
+    """Persist interruption evidence while never replacing the operator interrupt."""
+    marker_hash: str | None = None
+    if destination.exists():
+        try:
+            marker_hash = verify_committed_pair(
+                destination,
+                config,
+                identity,
+                report["benchmarker"]["commit"],
+                report["engine_kit"]["source_commit"],
+            )
+        except BaseException as verification_exc:
+            exc.add_note(
+                "published-pair verification during interrupt handling also failed: "
+                f"{type(verification_exc).__name__}: {verification_exc}"
+            )
+    if marker_hash is not None:
+        try:
+            entry = ledger.load()["pairs"][identity.pair_id]
+            if entry["state"] in {"started", "failed"}:
+                ledger.transition(
+                    identity.pair_id,
+                    "committed",
+                    reason="reconcile-verified-publication-after-interrupt",
+                    committed_marker_sha256=marker_hash,
+                )
+            elif (
+                entry["state"] != "committed"
+                or entry.get("committed_marker_sha256") != marker_hash
+            ):
+                raise CampaignError("ledger conflicts with verified publication after interrupt")
+        except BaseException as ledger_exc:
+            exc.add_note(
+                "ledger reconciliation during interrupt handling also failed: "
+                f"{type(ledger_exc).__name__}: {ledger_exc}"
+            )
+    failure = _persist_attempt_failure_preserving_primary(
+        root, identity, attempt, workspace, exc, private_roots
+    )
+    action = {
+        "pair_id": identity.pair_id,
+        "action": "committed-interrupted" if marker_hash is not None else "interrupted-incomplete",
+        "phase": phase,
+        "attempt": attempt,
+        "marker_sha256": marker_hash,
+        "failure": failure,
+    }
+    prior = next(
+        (
+            index for index in range(len(run_manifest["pair_actions"]) - 1, -1, -1)
+            if run_manifest["pair_actions"][index].get("pair_id") == identity.pair_id
+            and run_manifest["pair_actions"][index].get("attempt") == attempt
+        ),
+        None,
+    )
+    if prior is None:
+        run_manifest["pair_actions"].append(action)
+    else:
+        run_manifest["pair_actions"][prior] = action
+    try:
+        _finalize_run_manifest(
+            run_manifest_path, run_manifest, "interrupted", f"operator-interrupt-{phase}"
+        )
+    except BaseException as finalization_exc:
+        exc.add_note(
+            "run-manifest finalization during interrupt handling also failed: "
+            f"{type(finalization_exc).__name__}: {finalization_exc}"
+        )
 
 
 def run_campaign(
@@ -574,13 +661,13 @@ def run_campaign(
             try:
                 execution_root = executor.run(identity, workspace)
             except KeyboardInterrupt as exc:
-                failure = _persist_attempt_failure_preserving_primary(
-                    root, identity, attempt, workspace, exc, private_roots
+                _preserve_campaign_interrupt(
+                    root=root, config=config, identity=identity, attempt=attempt,
+                    workspace=workspace, destination=destination, ledger=ledger,
+                    run_manifest_path=run_manifest_path, run_manifest=run_manifest,
+                    report=report, private_roots=private_roots, exc=exc,
+                    phase="incomplete-pair",
                 )
-                run_manifest["pair_actions"].append(
-                    {"pair_id": identity.pair_id, "action": "interrupted-incomplete", "attempt": attempt, "failure": failure}
-                )
-                _finalize_run_manifest(run_manifest_path, run_manifest, "interrupted", "operator-interrupt-incomplete-pair")
                 raise
             except Exception as exc:
                 failure = _persist_attempt_failure_preserving_primary(
@@ -603,6 +690,15 @@ def run_campaign(
                 return _finalize_run_manifest(run_manifest_path, run_manifest, "failed", "pair-failure")
             try:
                 marker_hash = publish_pair(execution_root, artifact_root, config, identity, common, entry)
+            except KeyboardInterrupt as exc:
+                _preserve_campaign_interrupt(
+                    root=root, config=config, identity=identity, attempt=attempt,
+                    workspace=workspace, destination=destination, ledger=ledger,
+                    run_manifest_path=run_manifest_path, run_manifest=run_manifest,
+                    report=report, private_roots=private_roots, exc=exc,
+                    phase="publication",
+                )
+                raise
             except Exception as exc:
                 marker_hash = None
                 if destination.exists():
@@ -642,6 +738,15 @@ def run_campaign(
                     reason="immutable-pair-publication",
                     committed_marker_sha256=marker_hash,
                 )
+            except KeyboardInterrupt as exc:
+                _preserve_campaign_interrupt(
+                    root=root, config=config, identity=identity, attempt=attempt,
+                    workspace=workspace, destination=destination, ledger=ledger,
+                    run_manifest_path=run_manifest_path, run_manifest=run_manifest,
+                    report=report, private_roots=private_roots, exc=exc,
+                    phase="ledger-commit",
+                )
+                raise
             except Exception as exc:
                 failure = _persist_attempt_failure_preserving_primary(
                     root, identity, attempt, workspace, exc, private_roots
@@ -658,12 +763,26 @@ def run_campaign(
                     }
                 )
                 return _finalize_run_manifest(run_manifest_path, run_manifest, "failed", "post-publication-ledger-failure")
-            new_pairs += 1
-            run_manifest["pair_actions"].append(
-                {"pair_id": identity.pair_id, "action": "committed", "attempt": attempt, "marker_sha256": marker_hash}
-            )
-            if stop_file.exists():
-                return _finalize_run_manifest(run_manifest_path, run_manifest, "complete", "stop-file-after-committed-pair")
+            try:
+                new_pairs += 1
+                run_manifest["pair_actions"].append(
+                    {"pair_id": identity.pair_id, "action": "committed", "attempt": attempt, "marker_sha256": marker_hash}
+                )
+                if stop_file.exists():
+                    return _finalize_run_manifest(run_manifest_path, run_manifest, "complete", "stop-file-after-committed-pair")
+                if max_new_pairs is not None and new_pairs >= max_new_pairs:
+                    return _finalize_run_manifest(
+                        run_manifest_path, run_manifest, "complete", "operator-max-new-pairs"
+                    )
+            except KeyboardInterrupt as exc:
+                _preserve_campaign_interrupt(
+                    root=root, config=config, identity=identity, attempt=attempt,
+                    workspace=workspace, destination=destination, ledger=ledger,
+                    run_manifest_path=run_manifest_path, run_manifest=run_manifest,
+                    report=report, private_roots=private_roots, exc=exc,
+                    phase="run-finalization",
+                )
+                raise
         return _finalize_run_manifest(run_manifest_path, run_manifest, "complete", "campaign-bound-reached")
 
 def campaign_status(config: CampaignConfig, artifact_root: Path) -> dict[str, Any]:

@@ -139,21 +139,47 @@ def _game_actions(
         if terminal_kind == "ordinary_game_over":
             for seat, seat_actions in checker_actions.items():
                 terminal_seat = seat == winner
-                source = sum(action["dice"][0] for action in seat_actions) + (0 if terminal_seat else 1)
+                source = sum(
+                    sum(action["dice"]) if action["dice"][0] != action["dice"][1]
+                    else action["dice"][0] * 4
+                    for action in seat_actions
+                ) + (0 if terminal_seat else 1)
                 if not 1 <= source <= 24:
                     raise ValueError("fixture checker path exceeds the board")
                 for action in seat_actions:
-                    die = action["dice"][0]
-                    destination = source - die
-                    action["moves"] = [[str(source), "off" if destination == 0 else str(destination)]]
-                    source = destination
+                    dice_to_play = (
+                        action["dice"]
+                        if action["dice"][0] != action["dice"][1]
+                        else action["dice"] * 2
+                    )
+                    moves = []
+                    for die in dice_to_play:
+                        destination = source - die
+                        moves.append([str(source), "off" if destination == 0 else str(destination)])
+                        source = destination
+                    action["moves"] = moves
         else:
+            from types import SimpleNamespace
+
+            from runner.sage_gnu_campaign.match import _legal_checker_plays
+
+            fixture_players = _standard_players()
             for action in actions:
                 if action["action"] != "checker":
                     continue
-                die = action["dice"][0]
-                source = 8 if die == 1 else 13
-                action["moves"] = [[str(source), str(source - die)]]
+                board = SimpleNamespace(
+                    checker_count=SimpleNamespace(player_0=15, player_1=15),
+                    player_0=SimpleNamespace(**fixture_players["O"]),
+                    player_1=SimpleNamespace(**fixture_players["X"]),
+                )
+                position = SimpleNamespace(
+                    board=board, state=SimpleNamespace(dice=tuple(action["dice"]))
+                )
+                legal = _legal_checker_plays(position, action["physical_seat"])
+                action["moves"] = [list(move) for move in legal[0][1]]
+                _apply_fixture_checker(
+                    {"players": fixture_players}, action["physical_seat"], action["moves"]
+                )
         return actions
 
     actions: list[dict[str, Any]] = [
@@ -407,7 +433,10 @@ def _apply_fixture_checker(state: dict[str, Any], seat: str, moves: list[list[st
     actor = state["players"][seat]
     opponent = state["players"]["X" if seat == "O" else "O"]
     for source, destination in moves:
-        actor["points"][int(source) - 1] -= 1
+        if source == "bar":
+            actor["bar"] -= 1
+        else:
+            actor["points"][int(source) - 1] -= 1
         if destination == "off":
             actor["off"] += 1
             continue

@@ -17,9 +17,11 @@ from runner.sage_gnu_campaign.match import (
     MatchExecutionError,
     PairExecutor,
     _board_environment,
+    _board_snapshot,
     _frozen_gnu_sgf_application,
     _parse_terminal_event,
     _raise_on_gnu_error,
+    _simulate_checker_move,
     _validate_command_transition,
     _validate_native_outputs,
     _validate_opening_transition,
@@ -51,6 +53,84 @@ def test_canonical_gnu_dice_accepts_equivalent_stream_order(
 
 def test_canonical_gnu_dice_rejects_wrong_values() -> None:
     assert canonical_gnu_dice(4, 6) != canonical_gnu_dice(5, 6)
+
+
+def checker_position(
+    actor_points: dict[int, int], opponent_points: dict[int, int],
+    dice: tuple[int, int], *, actor_bar: int = 0, actor_off: int = 0,
+    opponent_bar: int = 0, opponent_off: int = 0,
+) -> object:
+    return position(
+        0, "player_0", "none", dice,
+        board=fake_board_state(
+            actor_points, opponent_points,
+            bar_0=actor_bar, bar_1=opponent_bar,
+            off_0=actor_off, off_1=opponent_off,
+        ),
+    )
+
+
+def test_complete_checker_play_rejects_partial_six_one_counterexample() -> None:
+    board = checker_position({13: 2}, {24: 15}, (6, 1), actor_off=13)
+    with pytest.raises(MatchExecutionError, match="complete legal play"):
+        _simulate_checker_move(board, "O", "13/7")
+    _simulate_checker_move(board, "O", "13/7 13/12")
+
+
+def test_checker_play_requires_higher_die_when_only_one_can_be_used() -> None:
+    board = checker_position(
+        {}, {7: 2, 8: 13}, (6, 1), actor_bar=1, actor_off=14
+    )
+    with pytest.raises(MatchExecutionError, match="complete legal play"):
+        _simulate_checker_move(board, "O", "bar/24")
+    _simulate_checker_move(board, "O", "bar/19")
+
+
+def test_checker_play_requires_bar_entry_before_other_checkers() -> None:
+    board = checker_position(
+        {13: 1}, {24: 15}, (6, 1), actor_bar=1, actor_off=13
+    )
+    with pytest.raises(MatchExecutionError, match="complete legal play"):
+        _simulate_checker_move(board, "O", "13/7 13/12")
+
+
+def test_checker_play_rejects_premature_and_illegal_oversize_bearoff() -> None:
+    premature = checker_position({7: 1, 6: 1}, {24: 15}, (6, 1), actor_off=13)
+    with pytest.raises(MatchExecutionError, match="complete legal play"):
+        _simulate_checker_move(premature, "O", "6/off 7/6")
+    oversize = checker_position({5: 1, 3: 1}, {24: 15}, (6, 1), actor_off=13)
+    with pytest.raises(MatchExecutionError, match="complete legal play"):
+        _simulate_checker_move(oversize, "O", "3/off 5/4")
+
+
+def test_checker_play_accepts_legal_oversize_after_using_other_die() -> None:
+    board = checker_position({3: 1}, {24: 15}, (6, 1), actor_off=14)
+    _simulate_checker_move(board, "O", "3/2 2/off")
+
+
+def test_checker_play_handles_fully_blocked_bar() -> None:
+    board = checker_position(
+        {}, {1: 2, 6: 2, 8: 11}, (6, 1), actor_bar=1, actor_off=14
+    )
+    assert _simulate_checker_move(board, "O", "cannot move") == _board_snapshot(board)
+
+
+def test_checker_play_requires_maximum_doubles_and_accepts_complete_doubles() -> None:
+    board = checker_position({24: 4}, {24: 15}, (3, 3), actor_off=11)
+    with pytest.raises(MatchExecutionError, match="complete legal play"):
+        _simulate_checker_move(board, "O", "24/21")
+    _simulate_checker_move(board, "O", "24/21(4)")
+
+
+def test_checker_play_accepts_legal_hit_and_equivalent_move_ordering() -> None:
+    hit = checker_position({8: 1}, {20: 1}, (3, 1), actor_off=14, opponent_off=14)
+    hit_result = _simulate_checker_move(hit, "O", "8/5*/4")
+    assert hit_result[6] == 1
+
+    ordering = checker_position({8: 1, 6: 1}, {24: 15}, (3, 1), actor_off=13)
+    assert _simulate_checker_move(ordering, "O", "8/5 6/5") == _simulate_checker_move(
+        ordering, "O", "6/5 8/5"
+    )
 
 
 def test_board_environment_overrides_engine_kit_dev_null_home(tmp_path: Path) -> None:
@@ -364,7 +444,7 @@ def terminal_event(
 class FakeEngineKit:
     def __init__(self) -> None:
         self.gnu_runtime = SimpleNamespace(executable=Path("/fake/gnubg"), environment=lambda: {})
-        first_game = fake_board_state({1: 1}, {24: 14}, bar_1=1, off_0=14)
+        first_game = fake_board_state({1: 1}, {23: 14}, bar_1=1, off_0=14)
         x_moved = fake_board_state(
             {24: 2, 13: 5, 8: 3, 6: 5},
             {24: 2, 13: 4, 8: 4, 6: 5},
@@ -375,7 +455,7 @@ class FakeEngineKit:
         )
         x_moved_again = fake_board_state(
             {24: 2, 13: 4, 9: 1, 8: 3, 6: 5},
-            {24: 2, 13: 3, 9: 1, 8: 4, 6: 5},
+            {24: 2, 13: 3, 8: 4, 6: 5, 5: 1},
         )
         self.position_values = [
                 position(0, "player_0", "none", (3, 1), board=first_game, cube_value=2),
@@ -409,7 +489,7 @@ class FakeEngineKit:
         ]
         self.positions = iter(self.position_values)
         self.analysis_calls: list[tuple[str, str]] = []
-        self.checker_commands = iter(["1/off", "13/9/8", "13/10/9", "13/11/9"])
+        self.checker_commands = iter(["1/off", "13/9/8", "13/10/9", "13/11/9/7/5"])
 
     def position_from_gnuid(self, gnuid: str) -> object:
         assert gnuid.startswith("P")
@@ -490,7 +570,7 @@ def test_run_match_simulates_all_normal_policy_paths_without_board_evaluation(
     ]
     assert FakeBoard.last is not None
     assert [command for command in FakeBoard.last.commands if command in {
-        "roll", "double", "take", "pass", "1/off", "13/9/8", "13/10/9", "13/11/9"
+        "roll", "double", "take", "pass", "1/off", "13/9/8", "13/10/9", "13/11/9/7/5"
     }] == [
         "1/off",
         "13/9/8",
@@ -498,7 +578,7 @@ def test_run_match_simulates_all_normal_policy_paths_without_board_evaluation(
         "13/10/9",
         "double",
         "take",
-        "13/11/9",
+        "13/11/9/7/5",
         "double",
         "pass",
     ]
@@ -661,26 +741,26 @@ def test_checker_move_reconciles_an_automatically_consumed_next_roll_exactly() -
     )
     after = position(
         0, "player_1", "none", (6, 4),
-        board=fake_board_state({8: 1}, {24: 1}, off_0=14, off_1=14),
+        board=fake_board_state({7: 1}, {24: 1}, off_0=14, off_1=14),
     )
     consumed = [{
         "prompt_type": "checker", "game_number": 1, "physical_seat": "X",
         "engine": "gnu", "die1": 4, "die2": 6,
     }]
     _validate_command_transition(
-        "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", None
+        "13/8/7", before, after, consumed, 1, "O", "sage", mapping, "O", None
     )
 
     # The deterministic stream remains (4, 6), while GNU exposes (6, 4).
     after.state.dice = (4, 6)
     _validate_command_transition(
-        "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", None
+        "13/8/7", before, after, consumed, 1, "O", "sage", mapping, "O", None
     )
 
     after.state.dice = (6, 5)
     with pytest.raises(MatchExecutionError, match="wrong board, cube, action, dice, or turn"):
         _validate_command_transition(
-            "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", None
+            "13/8/7", before, after, consumed, 1, "O", "sage", mapping, "O", None
         )
 
 
@@ -702,7 +782,7 @@ def test_checker_transition_rejects_every_stale_action_field(case: str) -> None:
     )
     after = position(
         0, "player_1", "none", None,
-        board=fake_board_state({8: 1}, {24: 1}, off_0=14, off_1=14),
+        board=fake_board_state({7: 1}, {24: 1}, off_0=14, off_1=14),
     )
     pending = after.cube.pending_action
     if case == "stale-offerer":
@@ -721,7 +801,7 @@ def test_checker_transition_rejects_every_stale_action_field(case: str) -> None:
 
     with pytest.raises(MatchExecutionError, match="wrong board, cube, action, dice, or turn"):
         _validate_command_transition(
-            "13/8", before, after, [], 1, "O", "sage", mapping, "X", None
+            "13/8/7", before, after, [], 1, "O", "sage", mapping, "X", None
         )
 
 
@@ -811,8 +891,8 @@ def test_pass_requires_game_over_not_resigned() -> None:
 
 def test_normal_bearoff_requires_game_over_not_resigned() -> None:
     mapping = {"O": "sage", "X": "gnu"}
-    before_board = fake_board_state({1: 1}, {24: 1}, off_0=14, off_1=14)
-    final_board = fake_board_state({}, {24: 1}, off_0=15, off_1=14)
+    before_board = fake_board_state({1: 1}, {23: 1}, off_0=14, off_1=14)
+    final_board = fake_board_state({}, {23: 1}, off_0=15, off_1=14)
     before = position(6, "player_0", "none", (1, 1), board=before_board)
     valid = position(
         7, None, "none", None, board=final_board,
@@ -886,7 +966,7 @@ def test_nonfinal_bearoff_rejects_substituted_terminal_kind_with_right_transitio
     mapping = {"O": "sage", "X": "gnu"}
     before = position(
         0, "player_0", "none", (1, 1),
-        board=fake_board_state({1: 1}, {24: 1}, off_0=14, off_1=14),
+        board=fake_board_state({1: 1}, {23: 1}, off_0=14, off_1=14),
     )
     after, consumed = next_game_opening(1)
     event = terminal_event(

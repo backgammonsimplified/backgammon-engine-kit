@@ -2177,101 +2177,154 @@ def _validate_cube_value(value: Any, label: str) -> int:
     return value
 
 
-def _simulate_checker_move(position: Any, physical_seat: str, notation: str) -> tuple[Any, ...]:
-    """Apply ordinary GNU move notation to a canonical self-relative board."""
-    snapshot = _board_snapshot(position)
-    checker_counts = [snapshot[0], snapshot[1]]
+def _validate_checker_board(snapshot: tuple[Any, ...]) -> None:
+    counts = (snapshot[0], snapshot[1])
+    points = (snapshot[2], snapshot[5])
+    bars = (snapshot[3], snapshot[6])
+    offs = (snapshot[4], snapshot[7])
+    if (
+        counts != (15, 15)
+        or any(len(player_points) != 24 for player_points in points)
+        or any(type(value) is not int or value < 0 for player_points in points for value in player_points)
+        or any(type(value) is not int or value < 0 for value in (*bars, *offs))
+        or any(sum(points[player]) + bars[player] + offs[player] != counts[player] for player in (0, 1))
+        or any(points[0][point] and points[1][23 - point] for point in range(24))
+    ):
+        raise MatchExecutionError("GNU checker board violates occupancy or checker conservation")
+
+
+def _checker_die_moves(
+    snapshot: tuple[Any, ...], actor: int, die: int,
+) -> list[tuple[tuple[Any, ...], tuple[str, str]]]:
+    """Enumerate every legal single-die play from one self-relative board."""
     points = [list(snapshot[2]), list(snapshot[5])]
     bars = [snapshot[3], snapshot[6]]
     offs = [snapshot[4], snapshot[7]]
-    actor = 0 if physical_seat == "O" else 1
     opponent = 1 - actor
-    raw_dice = position.state.dice
-    if (
-        not isinstance(raw_dice, (list, tuple))
-        or len(raw_dice) != 2
-        or any(type(value) is not int or not 1 <= value <= 6 for value in raw_dice)
-    ):
-        raise MatchExecutionError("GNU checker command has missing or malformed prior dice")
-    available_dice = list(raw_dice) * (2 if raw_dice[0] == raw_dice[1] else 1)
-    movement_dice: list[set[int]] = []
-    tokens = notation.split()
-    if not tokens:
-        raise MatchExecutionError("GNU checker command is empty")
-    for token in tokens:
-        multiplier = 1
-        repeated = re.search(r"\((\d+)\)$", token)
-        if repeated is not None:
-            multiplier = int(repeated.group(1))
-            token = token[: repeated.start()]
-        locations = [part.rstrip("*").lower() for part in token.split("/")]
-        if (
-            multiplier <= 0
-            or len(locations) < 2
-            or locations[0] == "off"
-            or any(
-                location not in {"bar", "off"}
-                and (not location.isdigit() or not 1 <= int(location) <= 24)
-                for location in locations
-            )
+    sources = [25] if bars[actor] else [point for point in range(24, 0, -1) if points[actor][point - 1]]
+    results: list[tuple[tuple[Any, ...], tuple[str, str]]] = []
+    all_home = not bars[actor] and not any(points[actor][6:])
+    for source in sources:
+        destination = source - die
+        bearoff = destination <= 0
+        if bearoff and (
+            not all_home
+            or destination < 0 and any(points[actor][source:])
         ):
-            raise MatchExecutionError(f"unsupported GNU checker notation: {notation!r}")
-        for _ in range(multiplier):
-            for source, destination in zip(locations, locations[1:]):
-                if source == "bar":
-                    source_number = 25
-                    if bars[actor] <= 0:
-                        raise MatchExecutionError("GNU checker notation moves an absent bar checker")
-                    bars[actor] -= 1
-                elif source == "off":
-                    raise MatchExecutionError("GNU checker notation moves a borne-off checker")
-                else:
-                    source_number = int(source)
-                    source_index = int(source) - 1
-                    if points[actor][source_index] <= 0:
-                        raise MatchExecutionError("GNU checker notation moves an absent checker")
-                    points[actor][source_index] -= 1
-                if destination == "bar":
-                    raise MatchExecutionError("GNU checker notation cannot move to the bar")
-                if destination == "off":
-                    allowed = {source_number}
-                    if not any(points[actor][source_number:]):
-                        allowed.update(die for die in available_dice if die > source_number)
-                    movement_dice.append(allowed)
-                    offs[actor] += 1
-                    continue
-                destination_index = int(destination) - 1
-                distance = source_number - int(destination)
-                if distance <= 0:
-                    raise MatchExecutionError("GNU checker notation moves in the wrong direction")
-                movement_dice.append({distance})
-                opponent_index = 23 - destination_index
-                if points[opponent][opponent_index] > 1:
-                    raise MatchExecutionError("GNU checker notation lands on a blocked point")
-                if points[opponent][opponent_index] == 1:
-                    points[opponent][opponent_index] = 0
-                    bars[opponent] += 1
-                points[actor][destination_index] += 1
-    if len(movement_dice) > len(available_dice):
-        raise MatchExecutionError("GNU checker notation uses more moves than the prior dice permit")
+            continue
+        if not bearoff:
+            opponent_index = 24 - destination
+            if points[opponent][opponent_index] > 1:
+                continue
+        moved_points = [list(player_points) for player_points in points]
+        moved_bars = list(bars)
+        moved_offs = list(offs)
+        if source == 25:
+            moved_bars[actor] -= 1
+            rendered_source = "bar"
+        else:
+            moved_points[actor][source - 1] -= 1
+            rendered_source = str(source)
+        if bearoff:
+            moved_offs[actor] += 1
+            rendered_destination = "off"
+        else:
+            opponent_index = 24 - destination
+            if moved_points[opponent][opponent_index] == 1:
+                moved_points[opponent][opponent_index] = 0
+                moved_bars[opponent] += 1
+            moved_points[actor][destination - 1] += 1
+            rendered_destination = str(destination)
+        moved = (
+            snapshot[0], snapshot[1], tuple(moved_points[0]), moved_bars[0], moved_offs[0],
+            tuple(moved_points[1]), moved_bars[1], moved_offs[1],
+        )
+        results.append((moved, (rendered_source, rendered_destination)))
+    return results
 
-    def dice_can_cover(index: int, remaining: list[int]) -> bool:
-        if index == len(movement_dice):
-            return True
-        for die in sorted(movement_dice[index]):
-            if die in remaining:
-                reduced = list(remaining)
-                reduced.remove(die)
-                if dice_can_cover(index + 1, reduced):
-                    return True
-        return False
 
-    if not dice_can_cover(0, available_dice):
-        raise MatchExecutionError("GNU checker notation does not agree with the prior dice")
-    return (
-        checker_counts[0], checker_counts[1], tuple(points[0]), bars[0], offs[0],
-        tuple(points[1]), bars[1], offs[1],
-    )
+def _legal_checker_plays(
+    position: Any, physical_seat: str,
+) -> list[tuple[tuple[Any, ...], tuple[tuple[str, str], ...], tuple[int, ...]]]:
+    snapshot = _board_snapshot(position)
+    _validate_checker_board(snapshot)
+    actor = 0 if physical_seat == "O" else 1
+    raw_dice = position.state.dice
+    if not isinstance(raw_dice, (list, tuple)) or len(raw_dice) != 2:
+        raise MatchExecutionError("GNU checker command has missing or malformed prior dice")
+    dice = canonical_gnu_dice(*raw_dice)
+    orders = [(dice[0],) * 4] if dice[0] == dice[1] else [dice, tuple(reversed(dice))]
+    plays: list[tuple[tuple[Any, ...], tuple[tuple[str, str], ...], tuple[int, ...]]] = []
+
+    def visit(
+        board: tuple[Any, ...], remaining: tuple[int, ...],
+        moves: tuple[tuple[str, str], ...], used: tuple[int, ...],
+    ) -> None:
+        if not remaining:
+            plays.append((board, moves, used))
+            return
+        options = _checker_die_moves(board, actor, remaining[0])
+        if not options:
+            plays.append((board, moves, used))
+            return
+        for moved, move in options:
+            visit(moved, remaining[1:], (*moves, move), (*used, remaining[0]))
+
+    for order in orders:
+        visit(snapshot, order, (), ())
+    maximum = max(len(used) for _, _, used in plays)
+    plays = [play for play in plays if len(play[2]) == maximum]
+    if dice[0] != dice[1] and maximum == 1 and any(play[2] == (dice[0],) for play in plays):
+        plays = [play for play in plays if play[2] == (dice[0],)]
+    unique = {(board, moves, used): (board, moves, used) for board, moves, used in plays}
+    return list(unique.values())
+
+
+def _checker_command_results(
+    position: Any, physical_seat: str, notation: str,
+) -> frozenset[tuple[Any, ...]]:
+    try:
+        moves = [tuple(move) for move in _parse_text_moves(notation)]
+    except MatchExecutionError as exc:
+        raise MatchExecutionError(f"unsupported GNU checker notation: {notation!r}") from exc
+    legal_plays = _legal_checker_plays(position, physical_seat)
+    legal_boards = {board for board, _, _ in legal_plays}
+    snapshot = _board_snapshot(position)
+    actor = 0 if physical_seat == "O" else 1
+    raw_dice = canonical_gnu_dice(*position.state.dice)
+    available = list(raw_dice) * (2 if raw_dice[0] == raw_dice[1] else 1)
+    rendered_results: set[tuple[Any, ...]] = set()
+
+    def apply_rendered(
+        board: tuple[Any, ...], index: int, remaining: tuple[int, ...],
+    ) -> None:
+        if index == len(moves):
+            rendered_results.add(board)
+            return
+        wanted = moves[index]
+        for die_index, die in enumerate(remaining):
+            for moved, move in _checker_die_moves(board, actor, die):
+                if move == wanted:
+                    apply_rendered(
+                        moved, index + 1,
+                        (*remaining[:die_index], *remaining[die_index + 1:]),
+                    )
+
+    apply_rendered(snapshot, 0, tuple(available))
+    results = frozenset(rendered_results & legal_boards)
+    if not results:
+        raise MatchExecutionError(
+            "GNU checker command is not a complete legal play for the prior dice"
+        )
+    return results
+
+
+def _simulate_checker_move(position: Any, physical_seat: str, notation: str) -> tuple[Any, ...]:
+    """Return the unique complete legal board represented by GNU notation."""
+    results = _checker_command_results(position, physical_seat, notation)
+    if len(results) != 1:
+        raise MatchExecutionError("GNU checker command has ambiguous resulting boards")
+    return next(iter(results))
 
 
 def _is_starting_board(position: Any) -> bool:
@@ -2377,8 +2430,6 @@ def _validate_command_transition(
         ):
             raise MatchExecutionError("GNU checker command precondition is semantically invalid")
         expected_final_board = _simulate_checker_move(position, physical_seat, command)
-        if expected_final_board == previous_board:
-            raise MatchExecutionError("GNU checker command did not move a checker")
         winner = actor
         actor_offset = 4 if physical_seat == "O" else 7
         if expected_final_board[actor_offset] == expected_final_board[0 if physical_seat == "O" else 1]:

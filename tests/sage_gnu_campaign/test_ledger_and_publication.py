@@ -9,6 +9,7 @@ import pytest
 
 from runner.sage_gnu_campaign.campaign import CampaignError, publish_pair, verify_committed_pair
 from runner.sage_gnu_campaign.config import load_campaign_config
+from runner.sage_gnu_campaign.dice import dice_record, namespace_seed, stream_id
 from runner.sage_gnu_campaign.identity import pair_identity
 from runner.sage_gnu_campaign.ledger import CampaignLedger, LedgerError
 from runner.sage_gnu_campaign.manifests import (
@@ -537,6 +538,76 @@ def test_publication_requires_authoritative_analysis_journals(
     artifact_root = tmp_path / "artifacts"
     artifact_root.mkdir()
     with pytest.raises(MatchExecutionError, match="analysis|manifest"):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
+
+
+@pytest.mark.parametrize(
+    "substitution", ["physical-seat", "engine", "stream", "cross-side"],
+)
+def test_publication_rejects_equal_dice_collision_identity_substitution(
+    tmp_path: Path, substitution: str,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    write_execution_fixture(execution, identity)
+    match = execution / "matches/A"
+    consumption_path = match / "dice/seat_dice_consumption.jsonl"
+    records = [json.loads(line) for line in consumption_path.read_text().splitlines()]
+    target = next(record for record in records if record["prompt_type"] == "checker")
+    other_seat = "X" if target["physical_seat"] == "O" else "O"
+    collision_side = "B" if substitution == "cross-side" else "A"
+    collision_seed = namespace_seed(identity.base_seed, collision_side)
+    collision = next(
+        (index, row) for index in range(1, 50001)
+        if (row := dice_record(
+            collision_seed, 1, 7, target["game_number"], other_seat, index
+        ))["die1"] == target["die1"] and row["die2"] == target["die2"]
+    )
+    collision_index, _ = collision
+    assert other_seat != target["physical_seat"]
+    if substitution == "physical-seat":
+        target["physical_seat"] = other_seat
+    elif substitution == "engine":
+        target["engine"] = "gnu" if target["engine"] == "sage" else "sage"
+    elif substitution == "stream":
+        target["stream_id"] = stream_id(
+            collision_seed, target["game_number"], other_seat
+        )
+        target["stream_path"] = f"game_{target['game_number']:03d}_seat_{other_seat}.csv"
+    else:
+        target.update({
+            "namespace": "B", "namespace_seed": collision_seed,
+            "pair_member": "B", "match_side": "B", "physical_seat": other_seat,
+            "engine": {"O": "gnu", "X": "sage"}[other_seat],
+            "roll_index": collision_index,
+            "stream_id": stream_id(collision_seed, target["game_number"], other_seat),
+            "stream_path": f"game_{target['game_number']:03d}_seat_{other_seat}.csv",
+        })
+    consumption_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    dice_manifest_path = match / "dice/seat_dice_manifest.json"
+    dice_manifest = json.loads(dice_manifest_path.read_text())
+    dice_manifest["consumption"]["sha256"] = hashlib.sha256(
+        consumption_path.read_bytes()
+    ).hexdigest()
+    write_json(dice_manifest_path, dice_manifest)
+    manifest_path = match / "match_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for path in (consumption_path, dice_manifest_path):
+        manifest["output_sha256"][str(path.relative_to(match))] = hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+    write_json(manifest_path, manifest)
+
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    with pytest.raises(MatchExecutionError):
         publish_pair(
             execution, artifact_root, config, identity, publication_common(),
             {"attempt_count": 1, "transitions": []},

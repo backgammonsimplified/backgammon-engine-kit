@@ -625,6 +625,16 @@ def write_complete_match(
         encoding="utf-8",
     )
 
+    fixture_action_ordinals: dict[int, int] = {}
+    for decision in decisions:
+        game_number = decision["game_number"]
+        command_type = decision["transition_evidence"]["command_type"]
+        if command_type in {"checker", "double", "take", "pass"}:
+            fixture_action_ordinals[game_number] = fixture_action_ordinals.get(game_number, 0) + 1
+            decision["action_ordinal"] = fixture_action_ordinals[game_number]
+        else:
+            decision["action_ordinal"] = None
+
     analysis_requests: list[dict[str, Any]] = []
     analysis_results: list[dict[str, Any]] = []
     for decision in decisions:

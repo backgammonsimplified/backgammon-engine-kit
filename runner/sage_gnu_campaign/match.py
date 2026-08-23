@@ -1082,6 +1082,7 @@ def _validate_publication_decisions(
         for number in journal_actions
     }
     checker_offsets = {number: 0 for number in journal_actions}
+    action_ordinals = {number: 0 for number in journal_actions}
     connected_gnuid: str | None = None
     for index, record in enumerate(decisions, 1):
         game_number = record.get("game_number")
@@ -1110,10 +1111,17 @@ def _validate_publication_decisions(
             "checker" if isinstance(command, str) and command not in {"roll", "double", "take"}
             else command
         )
+        represented_in_native = expected_command_type in {"checker", "double", "take", "pass"}
+        if represented_in_native:
+            action_ordinals[game_number] += 1
+            expected_action_ordinal: int | None = action_ordinals[game_number]
+        else:
+            expected_action_ordinal = None
         pre = transition.get("pre_command")
         post = transition.get("post_command")
         if (
             command_type != expected_command_type
+            or record.get("action_ordinal") != expected_action_ordinal
             or transition.get("acting_physical_seat") != seat
             or transition.get("acting_engine") != expected_engine_by_seat[seat]
             or transition.get("game_number") != game_number
@@ -1280,6 +1288,7 @@ def _validate_publication_dice(
     summary: Mapping[str, Any],
     dice_manifest: Mapping[str, Any],
     consumption: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
     expected_engine_by_seat: Mapping[str, str],
     identity: PairIdentity,
     match_side: str,
@@ -1407,18 +1416,68 @@ def _validate_publication_dice(
         }:
             raise MatchExecutionError("native opening does not match deterministic opening records")
         checker_indexes = {"O": 0, "X": 0}
-        checker_dice: list[list[int]] = [opening_dice]
+        checker_consumption: list[dict[str, Any]] = []
         for record in records[offset:]:
             seat = record["physical_seat"]
             checker_indexes[seat] += 1
             if record["roll_index"] != checker_indexes[seat]:
                 raise MatchExecutionError("deterministic checker roll indexes are reordered or duplicated")
-            checker_dice.append([record["die1"], record["die2"]])
-        native_checker_dice = [
-            action["dice"] for action in game["actions"] if action["action"] == "checker"
+            checker_consumption.append(record)
+        native_checkers = [
+            (action_ordinal, action)
+            for action_ordinal, action in enumerate(game["actions"], 1)
+            if action["action"] == "checker"
         ]
-        if checker_dice != native_checker_dice:
-            raise MatchExecutionError("native checker dice sequence conflicts with deterministic journal")
+        decision_checkers = [
+            record for record in decisions
+            if record.get("game_number") == game["game_number"]
+            and record.get("transition_evidence", {}).get("command_type") == "checker"
+        ]
+        if len(native_checkers) != len(decision_checkers) or len(native_checkers) != len(checker_consumption) + 1:
+            raise MatchExecutionError("checker action evidence is incomplete across publication authorities")
+        opening_by_seat = {record["physical_seat"]: record for record in final_opening}
+        for checker_index, ((action_ordinal, native), decision) in enumerate(
+            zip(native_checkers, decision_checkers)
+        ):
+            seat = native["physical_seat"]
+            engine = expected_engine_by_seat[seat]
+            if checker_index == 0:
+                actor_opening = opening_by_seat[seat]
+                opponent_opening = opening_by_seat[_opposite_seat(seat)]
+                dice_identity = {
+                    "game_number": game["game_number"], "action_ordinal": action_ordinal,
+                    "physical_seat": seat, "engine": engine, "dice": opening_dice,
+                    "stream_id": actor_opening["stream_id"],
+                    "stream_path": actor_opening["stream_path"],
+                    "roll_index": actor_opening["roll_index"],
+                    "opposing_stream_id": opponent_opening["stream_id"],
+                    "opposing_stream_path": opponent_opening["stream_path"],
+                }
+            else:
+                consumed = checker_consumption[checker_index - 1]
+                dice_identity = {
+                    "game_number": game["game_number"], "action_ordinal": action_ordinal,
+                    "physical_seat": consumed["physical_seat"], "engine": consumed["engine"],
+                    "dice": [consumed["die1"], consumed["die2"]],
+                    "stream_id": consumed["stream_id"], "stream_path": consumed["stream_path"],
+                    "roll_index": consumed["roll_index"],
+                }
+            expected_stream = stream_id(seed, game["game_number"], seat)
+            if (
+                dice_identity["physical_seat"] != seat
+                or dice_identity["engine"] != engine
+                or dice_identity["dice"] != native["dice"]
+                or dice_identity["stream_id"] != expected_stream
+                or dice_identity["stream_path"] != f"game_{game['game_number']:03d}_seat_{seat}.csv"
+                or decision.get("game_number") != dice_identity["game_number"]
+                or decision.get("action_ordinal") != dice_identity["action_ordinal"]
+                or decision.get("physical_seat") != dice_identity["physical_seat"]
+                or decision.get("engine") != dice_identity["engine"]
+                or decision.get("analysis_dice") != dice_identity["dice"]
+            ):
+                raise MatchExecutionError(
+                    "checker dice semantic identity conflicts across decision, stream, and native evidence"
+                )
 
 
 def _validate_publication_analysis(
@@ -1569,7 +1628,7 @@ def _validate_publication_journals(
         if not path.is_file() or output_hashes.get(relative) != sha256_file(path):
             raise MatchExecutionError("match manifest output hash conflicts with publication file")
     _validate_publication_dice(
-        match_root, summary, dice_manifest, consumption, expected_engine_by_seat,
+        match_root, summary, dice_manifest, consumption, decisions, expected_engine_by_seat,
         identity, match_side, roll_count, files_per_match,
     )
     _validate_publication_decisions(
@@ -2599,6 +2658,7 @@ class PairExecutor:
         _create_empty_file_durable(result_path)
         decisions = 0
         analysis_requests = 0
+        game_action_ordinal = 0
         game_number = 1
         completed = False
         primary_error: BaseException | None = None
@@ -2705,6 +2765,7 @@ class PairExecutor:
                         "match_side": side,
                         "record_ordinal": decisions,
                         "decision_ordinal": decisions,
+                        "action_ordinal": None,
                         "game_number": game_number,
                         "physical_seat": physical_seat,
                         "engine": engine,
@@ -2714,6 +2775,9 @@ class PairExecutor:
                         "command": command,
                         "engine_kit_result": record,
                     }
+                    if command != "roll" and command != "accept":
+                        game_action_ordinal += 1
+                        decision_evidence["action_ordinal"] = game_action_ordinal
                     before_consumption = len(dice.consumption)
                     previous_score = (int(position.score.player_0), int(position.score.player_1))
                     output = board.send(command, timeout_seconds=120.0)
@@ -2783,6 +2847,7 @@ class PairExecutor:
                                 next_score,
                             )
                             game_number = next_game_number
+                            game_action_ordinal = 0
                     elif opening_consumed:
                         raise MatchExecutionError("GNU consumed an opening without a completed-game transition")
                     board_text = next_board_text

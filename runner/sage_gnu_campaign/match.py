@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .config import CampaignConfig
-from .dice import SeatDiceController
+from .dice import (
+    SCHEMA_VERSION as DICE_SCHEMA_VERSION,
+    SeatDiceController,
+    dice_record,
+    namespace_seed,
+    stream_id,
+    stream_sha256,
+)
 from .engine_kit import EngineKitSession, analysis_result_forensics
 from .identity import PairIdentity
 from .manifests import fsync_directory, sha256_file, write_json
@@ -683,6 +690,11 @@ def _read_jsonl_evidence(path: Path, label: str) -> list[dict[str, Any]]:
 def _validate_complete_native_evidence(
     match_root: Path,
     expected_engine_by_seat: Mapping[str, str],
+    *,
+    identity: PairIdentity | None = None,
+    match_side: str | None = None,
+    roll_count: int | None = None,
+    files_per_match: int | None = None,
 ) -> dict[str, Any]:
     """Reconcile the complete native match against every numbered journal."""
     match_root = Path(match_root)
@@ -783,7 +795,384 @@ def _validate_complete_native_evidence(
         for game_number in expected_numbers for seat in ("O", "X")
     ):
         raise MatchExecutionError("deterministic dice manifest lacks native-game seat streams")
+    authority = (identity, match_side, roll_count, files_per_match)
+    if any(value is not None for value in authority):
+        if any(value is None for value in authority):
+            raise MatchExecutionError("publication dice authority is incomplete")
+        assert identity is not None and match_side is not None
+        assert roll_count is not None and files_per_match is not None
+        _validate_publication_journals(
+            match_root, summary, manifest, decisions, dice_manifest, consumption,
+            expected_engine_by_seat, identity, match_side, roll_count, files_per_match,
+        )
     return summary
+
+
+def _native_action_projection(action: Mapping[str, Any]) -> dict[str, Any]:
+    projected: dict[str, Any] = {
+        "action": action.get("action"),
+        "physical_seat": action.get("physical_seat"),
+    }
+    if action.get("action") == "checker":
+        projected.update({"dice": action.get("dice"), "moves": action.get("moves")})
+    return projected
+
+
+def _expected_terminal_event(
+    game: Mapping[str, Any], expected_engine_by_seat: Mapping[str, str],
+) -> dict[str, Any]:
+    terminal = game["terminal"]
+    kind = terminal["kind"]
+    winner = game["winner_physical_seat"]
+    event: dict[str, Any] = {
+        "kind": kind,
+        "winner_physical_seat": winner,
+        "winner_engine": expected_engine_by_seat[winner],
+        "points": game["points"],
+        "result_level": terminal["result_level"],
+    }
+    if kind == "drop":
+        loser = "X" if winner == "O" else "O"
+        event.update({
+            "loser_physical_seat": loser,
+            "loser_engine": expected_engine_by_seat[loser],
+        })
+    elif kind == "resignation":
+        event["resignation_level"] = terminal["result_level"]
+    return event
+
+
+def _validate_publication_decisions(
+    summary: Mapping[str, Any],
+    decisions: list[dict[str, Any]],
+    expected_engine_by_seat: Mapping[str, str],
+    identity: PairIdentity,
+    match_side: str,
+) -> None:
+    if match_side not in {"A", "B"}:
+        raise MatchExecutionError("decision publication authority has an invalid match side")
+    expected_authority = {
+        "campaign_id": identity.campaign_id,
+        "pair_id": identity.pair_id,
+        "pair_index": identity.pair_index,
+        "pair_member": match_side,
+        "match_side": match_side,
+    }
+    observed_games: list[int] = []
+    journal_actions: dict[int, list[dict[str, Any]]] = {
+        game["game_number"]: [] for game in summary["games"]
+    }
+    terminals: dict[int, list[int]] = {number: [] for number in journal_actions}
+    for index, record in enumerate(decisions, 1):
+        game_number = record.get("game_number")
+        seat = record.get("physical_seat")
+        transition = record.get("transition_evidence")
+        if (
+            any(record.get(key) != value for key, value in expected_authority.items())
+            or record.get("record_ordinal") != index
+            or record.get("decision_ordinal") != index
+            or type(game_number) is not int
+            or game_number not in journal_actions
+            or seat not in {"O", "X"}
+            or record.get("engine") != expected_engine_by_seat[seat]
+            or not isinstance(record.get("gnuid"), str)
+            or not record["gnuid"]
+            or not isinstance(transition, dict)
+        ):
+            raise MatchExecutionError("decision journal authority or ordered record identity is invalid")
+        observed_games.append(game_number)
+        game = summary["games"][game_number - 1]
+        command = record.get("command")
+        command_type = transition.get("command_type")
+        expected_command_type = (
+            "pass" if command == "pass" else
+            "accepted_resignation" if command == "accept" else
+            "checker" if isinstance(command, str) and command not in {"roll", "double", "take"}
+            else command
+        )
+        pre = transition.get("pre_command")
+        post = transition.get("post_command")
+        if (
+            command_type != expected_command_type
+            or transition.get("acting_physical_seat") != seat
+            or transition.get("acting_engine") != expected_engine_by_seat[seat]
+            or transition.get("game_number") != game_number
+            or not isinstance(pre, dict)
+            or pre.get("gnuid") != record["gnuid"]
+            or pre.get("score") != game["start_score"]
+            or not isinstance(post, dict)
+            or not isinstance(post.get("gnuid"), str)
+            or not post["gnuid"]
+            or post["gnuid"] == pre["gnuid"]
+        ):
+            raise MatchExecutionError("decision transition command, actor, or pre/post state is invalid")
+        event = transition.get("terminal_event")
+        subsequent = transition.get("subsequent_opening_state")
+        if event is None:
+            if post.get("score") != game["start_score"] or subsequent is not None:
+                raise MatchExecutionError("non-terminal decision changes score or carries an opening")
+        else:
+            terminals[game_number].append(index - 1)
+            if event != _expected_terminal_event(game, expected_engine_by_seat):
+                raise MatchExecutionError("decision terminal kind/level/result conflicts with native evidence")
+            if post.get("score") != game["post_score"]:
+                raise MatchExecutionError("decision terminal post-command score conflicts with native evidence")
+            kind = event["kind"]
+            if (
+                kind == "ordinary_game_over" and (
+                    command_type != "checker" or seat != game["winner_physical_seat"]
+                )
+                or kind == "drop" and (
+                    command_type != "pass" or seat == game["winner_physical_seat"]
+                )
+                or kind == "resignation" and (
+                    command_type != "accepted_resignation" or seat != game["winner_physical_seat"]
+                )
+            ):
+                raise MatchExecutionError("decision terminal command or acting seat has wrong semantics")
+            if game_number == summary["game_count"]:
+                if subsequent is not None:
+                    raise MatchExecutionError("match-final terminal unexpectedly carries a subsequent opening")
+            else:
+                next_game = summary["games"][game_number]
+                expected_opening = {
+                    "game_number": game_number + 1,
+                    "gnuid": post["gnuid"],
+                    "score": game["post_score"],
+                    "on_roll_physical_seat": next_game["opening_state"]["on_roll_physical_seat"],
+                    "decision_physical_seat": next_game["opening_state"]["on_roll_physical_seat"],
+                    "dice": next_game["opening_state"]["dice"],
+                }
+                if subsequent != expected_opening:
+                    raise MatchExecutionError("decision terminal lacks the exact next-game opening state")
+                if index >= len(decisions):
+                    raise MatchExecutionError("decision terminal has no immediately following game record")
+                following = decisions[index]
+                if (
+                    following.get("game_number") != game_number + 1
+                    or following.get("gnuid") != subsequent["gnuid"]
+                    or not isinstance(following.get("transition_evidence"), dict)
+                    or following["transition_evidence"].get("pre_command", {}).get("score") != game["post_score"]
+                ):
+                    raise MatchExecutionError("subsequent opening is reordered or belongs to the wrong game")
+
+        if command_type == "checker":
+            try:
+                moves = _parse_text_moves(str(command))
+            except MatchExecutionError as exc:
+                raise MatchExecutionError("decision checker command is not canonicalizable") from exc
+            dice = record.get("analysis_dice")
+            if (
+                record.get("decision_type") != "checker"
+                or not isinstance(dice, list) or len(dice) != 2
+                or any(type(value) is not int or not 1 <= value <= 6 for value in dice)
+            ):
+                raise MatchExecutionError("decision checker dice/type evidence is invalid")
+            journal_actions[game_number].append({
+                "action": "checker", "physical_seat": seat, "dice": dice, "moves": moves,
+            })
+        elif command_type in {"double", "take", "pass"}:
+            if record.get("decision_type") != "cube" or record.get("analysis_dice") is not None:
+                raise MatchExecutionError("decision cube type/dice evidence is invalid")
+            journal_actions[game_number].append({
+                "action": "drop" if command_type == "pass" else command_type,
+                "physical_seat": seat,
+            })
+        elif command_type == "roll":
+            if record.get("decision_type") != "cube" or record.get("analysis_dice") is not None:
+                raise MatchExecutionError("decision roll type/dice evidence is invalid")
+        elif command_type == "accepted_resignation":
+            if record.get("decision_type") != "board-rule" or record.get("analysis_dice") is not None:
+                raise MatchExecutionError("decision resignation type/dice evidence is invalid")
+        else:
+            raise MatchExecutionError("decision journal has an unsupported command type")
+
+    if observed_games != sorted(observed_games):
+        raise MatchExecutionError("decision journal game records are reordered")
+    for game in summary["games"]:
+        number = game["game_number"]
+        if len(terminals[number]) != 1:
+            raise MatchExecutionError("decision journal lacks one exact ordered terminal per game")
+        terminal_index = terminals[number][0]
+        if any(record.get("game_number") == number for record in decisions[terminal_index + 1:]):
+            raise MatchExecutionError("decision journal contains records after a game's terminal")
+        expected_actions = [_native_action_projection(action) for action in game["actions"]]
+        if journal_actions[number] != expected_actions:
+            raise MatchExecutionError("decision journal actions do not match complete native game sequence")
+
+
+def _validate_publication_dice(
+    match_root: Path,
+    summary: Mapping[str, Any],
+    dice_manifest: Mapping[str, Any],
+    consumption: list[dict[str, Any]],
+    expected_engine_by_seat: Mapping[str, str],
+    identity: PairIdentity,
+    match_side: str,
+    roll_count: int,
+    files_per_match: int,
+) -> None:
+    seed = namespace_seed(identity.base_seed, match_side)
+    if (
+        dice_manifest.get("schema_version") != DICE_SCHEMA_VERSION
+        or dice_manifest.get("namespace") != match_side
+        or dice_manifest.get("namespace_seed") != seed
+        or dice_manifest.get("base_seed") != identity.base_seed
+        or dice_manifest.get("pair_id") != identity.pair_id
+        or dice_manifest.get("roll_count") != roll_count
+        or dice_manifest.get("files_per_match") != files_per_match
+    ):
+        raise MatchExecutionError("deterministic dice manifest conflicts with frozen pair authority")
+    streams = dice_manifest["streams"]
+    stream_keys: set[tuple[int, str]] = set()
+    active_games = {game["game_number"] for game in summary["games"]}
+    for stream in streams:
+        if not isinstance(stream, dict):
+            raise MatchExecutionError("deterministic dice stream identity is malformed")
+        game_number = stream.get("game_number")
+        seat = stream.get("physical_seat")
+        if type(game_number) is not int or not 1 <= game_number <= files_per_match or seat not in {"O", "X"}:
+            raise MatchExecutionError("deterministic dice stream game/seat identity is invalid")
+        key = (game_number, seat)
+        if key in stream_keys:
+            raise MatchExecutionError("deterministic dice manifest duplicates a stream")
+        stream_keys.add(key)
+        expected_path = f"game_{game_number:03d}_seat_{seat}.csv"
+        if (
+            stream.get("namespace") != match_side
+            or stream.get("namespace_seed") != seed
+            or stream.get("base_seed") != identity.base_seed
+            or stream.get("pair_id") != identity.pair_id
+            or stream.get("pair_member") != match_side
+            or stream.get("match_side") != match_side
+            or stream.get("engine") != expected_engine_by_seat[seat]
+            or stream.get("stream_id") != stream_id(seed, game_number, seat)
+            or stream.get("path") != expected_path
+            or not isinstance(stream.get("sha256"), str)
+            or len(stream["sha256"]) != 64
+        ):
+            raise MatchExecutionError("deterministic dice stream conflicts with pair/seat authority")
+        if game_number in active_games and stream["sha256"] != stream_sha256(
+            seed, game_number, seat, roll_count
+        ):
+            raise MatchExecutionError("active deterministic dice stream hash conflicts with frozen authority")
+        stream_path = match_root / "dice" / expected_path
+        if stream_path.exists() and sha256_file(stream_path) != stream["sha256"]:
+            raise MatchExecutionError("deterministic dice stream file conflicts with its manifest hash")
+    if any((game_number, seat) not in stream_keys for game_number in active_games for seat in ("O", "X")):
+        raise MatchExecutionError("deterministic dice manifest lacks an active native-game stream")
+
+    game_records: dict[int, list[dict[str, Any]]] = {number: [] for number in active_games}
+    last_game = 0
+    for ordinal, record in enumerate(consumption, 1):
+        game_number = record.get("game_number")
+        seat = record.get("physical_seat")
+        prompt_type = record.get("prompt_type")
+        roll_index = record.get("roll_index")
+        if (
+            record.get("schema_version") != DICE_SCHEMA_VERSION
+            or record.get("namespace") != match_side
+            or record.get("namespace_seed") != seed
+            or record.get("base_seed") != identity.base_seed
+            or record.get("pair_id") != identity.pair_id
+            or record.get("pair_member") != match_side
+            or record.get("match_side") != match_side
+            or record.get("consumption_ordinal") != ordinal
+            or type(game_number) is not int
+            or game_number not in active_games
+            or game_number < last_game
+            or seat not in {"O", "X"}
+            or record.get("engine") != expected_engine_by_seat[seat]
+            or prompt_type not in {"opening", "checker"}
+            or type(roll_index) is not int
+            or not 1 <= roll_index <= roll_count
+            or record.get("stream_id") != stream_id(seed, game_number, seat)
+            or record.get("stream_path") != f"game_{game_number:03d}_seat_{seat}.csv"
+        ):
+            raise MatchExecutionError("deterministic dice consumption ordering/authority is invalid")
+        last_game = game_number
+        authoritative = dice_record(seed, 1, 7, game_number, seat, roll_index)
+        expected_dice = (
+            (authoritative["opening_die"], None)
+            if prompt_type == "opening"
+            else (authoritative["die1"], authoritative["die2"])
+        )
+        if (record.get("die1"), record.get("die2")) != expected_dice:
+            raise MatchExecutionError("deterministic dice values conflict with frozen stream authority")
+        game_records[game_number].append(record)
+
+    for game in summary["games"]:
+        records = game_records[game["game_number"]]
+        offset = 0
+        opening_index = 1
+        final_opening: tuple[dict[str, Any], dict[str, Any]] | None = None
+        while offset + 1 < len(records):
+            o_record, x_record = records[offset:offset + 2]
+            if (
+                o_record["prompt_type"] != "opening" or x_record["prompt_type"] != "opening"
+                or o_record["physical_seat"] != "O" or x_record["physical_seat"] != "X"
+                or o_record["roll_index"] != opening_index or x_record["roll_index"] != opening_index
+            ):
+                break
+            final_opening = (o_record, x_record)
+            offset += 2
+            if o_record["die1"] != x_record["die1"]:
+                break
+            opening_index += 1
+        if final_opening is None or final_opening[0]["die1"] == final_opening[1]["die1"]:
+            raise MatchExecutionError("deterministic dice journal lacks a complete non-tied opening")
+        if any(record["prompt_type"] == "opening" for record in records[offset:]):
+            raise MatchExecutionError("deterministic opening records are reordered after checker rolls")
+        opener = "O" if final_opening[0]["die1"] > final_opening[1]["die1"] else "X"
+        opening_dice = [
+            final_opening[0 if opener == "O" else 1]["die1"],
+            final_opening[1 if opener == "O" else 0]["die1"],
+        ]
+        if game["opening_state"] != {
+            "cube_value": 1, "on_roll_physical_seat": opener, "dice": opening_dice,
+        }:
+            raise MatchExecutionError("native opening does not match deterministic opening records")
+        checker_indexes = {"O": 0, "X": 0}
+        checker_dice: list[list[int]] = [opening_dice]
+        for record in records[offset:]:
+            seat = record["physical_seat"]
+            checker_indexes[seat] += 1
+            if record["roll_index"] != checker_indexes[seat]:
+                raise MatchExecutionError("deterministic checker roll indexes are reordered or duplicated")
+            checker_dice.append([record["die1"], record["die2"]])
+        native_checker_dice = [
+            action["dice"] for action in game["actions"] if action["action"] == "checker"
+        ]
+        if checker_dice != native_checker_dice:
+            raise MatchExecutionError("native checker dice sequence conflicts with deterministic journal")
+
+
+def _validate_publication_journals(
+    match_root: Path,
+    summary: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    decisions: list[dict[str, Any]],
+    dice_manifest: Mapping[str, Any],
+    consumption: list[dict[str, Any]],
+    expected_engine_by_seat: Mapping[str, str],
+    identity: PairIdentity,
+    match_side: str,
+    roll_count: int,
+    files_per_match: int,
+) -> None:
+    if (
+        manifest.get("side") != match_side
+        or manifest.get("pair_member") != match_side
+        or manifest.get("namespace_seed") != namespace_seed(identity.base_seed, match_side)
+    ):
+        raise MatchExecutionError("match manifest conflicts with publication pair/side authority")
+    _validate_publication_decisions(
+        summary, decisions, expected_engine_by_seat, identity, match_side
+    )
+    _validate_publication_dice(
+        match_root, summary, dice_manifest, consumption, expected_engine_by_seat,
+        identity, match_side, roll_count, files_per_match,
+    )
 
 
 def _validate_opening_transition(
@@ -1785,6 +2174,7 @@ class PairExecutor:
             roll_count=self.config.data["dice"]["roll_count_per_game_seat"],
             files_per_match=self.config.data["dice"]["files_per_match"],
             engine_by_seat=engine_by_seat,
+            pair_id=identity.pair_id,
         )
         dice.prepare_files()
         board: GnuBoardProcess | None = None
@@ -1889,10 +2279,14 @@ class PairExecutor:
                         "pair_index": identity.pair_index,
                         "pair_member": side,
                         "match_side": side,
+                        "record_ordinal": decisions,
+                        "decision_ordinal": decisions,
                         "game_number": game_number,
                         "physical_seat": physical_seat,
                         "engine": engine,
                         "gnuid": gnuid,
+                        "decision_type": decision_type or "board-rule",
+                        "analysis_dice": list(analysis_dice) if analysis_dice is not None else None,
                         "command": command,
                         "engine_kit_result": record,
                     }

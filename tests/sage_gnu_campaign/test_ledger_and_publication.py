@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -177,6 +178,162 @@ def test_publication_accepts_complete_real_shaped_multi_game_native_evidence(tmp
 
 
 @pytest.mark.parametrize(
+    "terminal_kind,games",
+    [
+        ("drop", [("O", 1), ("O", 6)]),
+        ("resignation", [("O", 2), ("O", 6)]),
+    ],
+)
+def test_publication_accepts_exact_drop_and_resignation_semantics(
+    tmp_path: Path, terminal_kind: str, games: list[tuple[str, int]],
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    write_execution_fixture(
+        execution, identity, games, [terminal_kind, "ordinary_game_over"]
+    )
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    marker = publish_pair(
+        execution, artifact_root, config, identity, publication_common(),
+        {"attempt_count": 1, "transitions": []},
+    )
+    assert len(marker) == 64
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "resignation-encoded-as-normal",
+        "normal-encoded-as-resignation",
+        "pass-encoded-as-resignation",
+        "wrong-resignation-level",
+        "wrong-command-type",
+        "wrong-acting-seat",
+        "wrong-acting-engine",
+        "wrong-pre-command-score",
+        "wrong-post-command-score",
+        "missing-subsequent-opening",
+        "subsequent-opening-wrong-game",
+        "reordered-decision-records",
+        "reordered-dice-records",
+        "duplicated-dice-record",
+        "missing-dice-record",
+        "wrong-roll-index",
+        "correct-dice-wrong-physical-seat",
+        "correct-dice-wrong-engine",
+        "wrong-stream-identity",
+        "wrong-pair-seed",
+        "wrong-match-side",
+    ],
+)
+def test_publish_pair_rejects_terminal_and_ordered_journal_corruption(
+    tmp_path: Path, case: str,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    terminal_kinds = None
+    games = [("O", 2), ("X", 1), ("O", 6)]
+    if case in {"resignation-encoded-as-normal", "wrong-resignation-level"}:
+        games = [("O", 2), ("O", 6)]
+        terminal_kinds = ["resignation", "ordinary_game_over"]
+    elif case == "pass-encoded-as-resignation":
+        games = [("O", 1), ("O", 6)]
+        terminal_kinds = ["drop", "ordinary_game_over"]
+    write_execution_fixture(execution, identity, games, terminal_kinds)
+    match = execution / "matches/A"
+    decision_path = match / "decisions.jsonl"
+    decisions = [json.loads(line) for line in decision_path.read_text(encoding="utf-8").splitlines()]
+    terminal_index = next(
+        index for index, record in enumerate(decisions)
+        if record["transition_evidence"]["terminal_event"] is not None
+    )
+    terminal = decisions[terminal_index]["transition_evidence"]
+
+    if case == "resignation-encoded-as-normal":
+        terminal["terminal_event"]["kind"] = "ordinary_game_over"
+        terminal["terminal_event"].pop("resignation_level")
+    elif case == "normal-encoded-as-resignation":
+        terminal["terminal_event"]["kind"] = "resignation"
+        terminal["terminal_event"]["resignation_level"] = terminal["terminal_event"]["result_level"]
+    elif case == "pass-encoded-as-resignation":
+        terminal["terminal_event"]["kind"] = "resignation"
+        terminal["terminal_event"]["resignation_level"] = 1
+        terminal["terminal_event"].pop("loser_physical_seat")
+        terminal["terminal_event"].pop("loser_engine")
+    elif case == "wrong-resignation-level":
+        terminal["terminal_event"]["resignation_level"] = 3
+    elif case == "wrong-command-type":
+        terminal["command_type"] = "accepted_resignation"
+    elif case == "wrong-acting-seat":
+        terminal["acting_physical_seat"] = "X" if terminal["acting_physical_seat"] == "O" else "O"
+    elif case == "wrong-acting-engine":
+        terminal["acting_engine"] = "gnu" if terminal["acting_engine"] == "sage" else "sage"
+    elif case == "wrong-pre-command-score":
+        terminal["pre_command"]["score"][0] += 1
+    elif case == "wrong-post-command-score":
+        terminal["post_command"]["score"][0] += 1
+    elif case == "missing-subsequent-opening":
+        terminal["subsequent_opening_state"] = None
+    elif case == "subsequent-opening-wrong-game":
+        terminal["subsequent_opening_state"]["game_number"] += 1
+    elif case == "reordered-decision-records":
+        decisions[0], decisions[1] = decisions[1], decisions[0]
+
+    dice_path = match / "dice/seat_dice_consumption.jsonl"
+    dice_records = [json.loads(line) for line in dice_path.read_text(encoding="utf-8").splitlines()]
+    if case == "reordered-dice-records":
+        dice_records[0], dice_records[1] = dice_records[1], dice_records[0]
+        for ordinal, record in enumerate(dice_records, 1):
+            record["consumption_ordinal"] = ordinal
+    elif case == "duplicated-dice-record":
+        dice_records.insert(1, dict(dice_records[0]))
+        for ordinal, record in enumerate(dice_records, 1):
+            record["consumption_ordinal"] = ordinal
+    elif case == "missing-dice-record":
+        del dice_records[0]
+        for ordinal, record in enumerate(dice_records, 1):
+            record["consumption_ordinal"] = ordinal
+    elif case == "wrong-roll-index":
+        dice_records[0]["roll_index"] += 1
+    elif case == "correct-dice-wrong-physical-seat":
+        dice_records[0]["physical_seat"] = "X"
+    elif case == "correct-dice-wrong-engine":
+        dice_records[0]["engine"] = "gnu"
+    elif case == "wrong-stream-identity":
+        dice_records[0]["stream_id"] = "stream-" + "0" * 64
+    elif case == "wrong-pair-seed":
+        dice_records[0]["base_seed"] = "sha256:" + "0" * 64
+    elif case == "wrong-match-side":
+        dice_records[0]["match_side"] = "B"
+
+    decision_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in decisions),
+        encoding="utf-8",
+    )
+    dice_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in dice_records),
+        encoding="utf-8",
+    )
+    dice_manifest_path = match / "dice/seat_dice_manifest.json"
+    dice_manifest = json.loads(dice_manifest_path.read_text(encoding="utf-8"))
+    dice_manifest["consumption"]["entries"] = len(dice_records)
+    dice_manifest["consumption"]["sha256"] = hashlib.sha256(dice_path.read_bytes()).hexdigest()
+    write_json(dice_manifest_path, dice_manifest)
+
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    with pytest.raises(MatchExecutionError):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
+    assert not (artifact_root / config.campaign_id / "pairs" / identity.pair_id).exists()
+
+
+@pytest.mark.parametrize(
     "case",
     [
         "text-truncated-after-game-1",
@@ -276,7 +433,11 @@ def test_publication_rejects_incomplete_or_cross_format_native_game_evidence(
     elif case == "decision-result-mismatch":
         decisions = match / "decisions.jsonl"
         records = [json.loads(line) for line in decisions.read_text(encoding="utf-8").splitlines()]
-        records[1]["transition_evidence"]["terminal_event"]["points"] = 2
+        terminal_record = next(
+            record for record in records
+            if record["transition_evidence"]["terminal_event"] is not None
+        )
+        terminal_record["transition_evidence"]["terminal_event"]["points"] += 1
         decisions.write_text(
             "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
         )
@@ -286,13 +447,23 @@ def test_publication_rejects_incomplete_or_cross_format_native_game_evidence(
         manifest["native_evidence"]["games"][0]["points"] = 3
         write_json(manifest_path, manifest)
     elif case == "same-result-different-checker-move":
-        text_path.write_text(text.replace("31: 8/5 6/5", "31: 8/4 6/5", 1), encoding="utf-8")
+        move = re.search(r"[1-6]{2}: (\d+)/(\d+)", text)
+        assert move is not None
+        replacement = f"{move.group(1)}/{1 if move.group(2) != '1' else 2}"
+        text_path.write_text(text[:move.start(1)] + replacement + text[move.end(2):], encoding="utf-8")
     elif case == "same-result-different-dice-sequence":
-        text_path.write_text(text.replace("31: 8/5 6/5", "32: 8/5 6/5", 1), encoding="utf-8")
+        dice = re.search(r"([1-6])([1-6]):", text)
+        assert dice is not None
+        changed = "1" if dice.group(1) != "1" and dice.group(2) != "1" else "6"
+        text_path.write_text(text[:dice.start(1)] + changed + text[dice.end(1):], encoding="utf-8")
     elif case == "same-result-different-cube-action":
         text_path.write_text(text.replace("Doubles => 2                Takes", "Doubles => 2                Drops", 1), encoding="utf-8")
     elif case == "same-result-different-terminal-action":
-        text_path.write_text(text.replace("65: 6/off 5/off", "Drops", 1), encoding="utf-8")
+        changed, count = re.subn(
+            r"[1-6]{2}: [^\n]+(?=\n\s+Wins 2 points)", "Drops", text, count=1
+        )
+        assert count == 1
+        text_path.write_text(changed, encoding="utf-8")
     elif case == "root-only-sgf-with-result":
         trees = sgf_path.read_text(encoding="utf-8").splitlines(keepends=True)
         trees[0] = re.sub(r";[WB]\[[^\n]*", ")\n", trees[0], count=1)
@@ -302,21 +473,26 @@ def test_publication_rejects_incomplete_or_cross_format_native_game_evidence(
         first_actions = text.index("  1)", text.index(" Game 1"))
         text_path.write_text(text[:first_actions] + text[first_result:], encoding="utf-8")
     elif case == "reordered-actions":
-        text_path.write_text(
-            text.replace(
-                "31: 8/5 6/5                 42: 13/9 6/4",
-                "42: 13/9 6/4                31: 8/5 6/5",
-                1,
-            ),
-            encoding="utf-8",
-        )
+        row = re.search(r"(?m)^(\s*1\) )(.{27}) (.+)$", text)
+        assert row is not None
+        swapped = row.group(1) + f"{row.group(3):<27} " + row.group(2).strip()
+        text_path.write_text(text[:row.start()] + swapped + text[row.end():], encoding="utf-8")
     elif case == "missing-move":
-        text_path.write_text(text.replace("31: 8/5 6/5", "31: 8/5", 1), encoding="utf-8")
+        move = re.search(r"([1-6]{2}: \d+/\d+) \d+/\d+", text)
+        assert move is not None
+        text_path.write_text(text[:move.start()] + move.group(1) + text[move.end():], encoding="utf-8")
     elif case == "extra-move":
-        text_path.write_text(text.replace("31: 8/5 6/5", "31: 8/5 6/5 13/10", 1), encoding="utf-8")
+        move = re.search(r"[1-6]{2}: \d+/\d+ \d+/\d+", text)
+        assert move is not None
+        text_path.write_text(text[:move.end()] + " 13/10" + text[move.end():], encoding="utf-8")
     elif case == "action-belongs-to-wrong-game":
+        game_two_action = re.search(r"[1-6]{2}: \d+/\d+ \d+/\d+", text[game_2:])
+        game_one_action = re.search(r"[1-6]{2}: \d+/\d+ \d+/\d+", text)
+        assert game_two_action is not None and game_one_action is not None
+        transplanted = game_two_action.group(0)
         text_path.write_text(
-            text.replace("31: 8/5 6/5", "52: 13/8 8/6", 1), encoding="utf-8"
+            text[:game_one_action.start()] + transplanted + text[game_one_action.end():],
+            encoding="utf-8",
         )
     else:  # pragma: no cover
         raise AssertionError(case)

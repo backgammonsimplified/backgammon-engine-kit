@@ -5,6 +5,7 @@ import hashlib
 import json
 import random
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,7 @@ def stream_content(seed: str, game_number: int, seat: str, roll_count: int) -> b
     return ("\r\n".join(lines) + "\r\n").encode("utf-8")
 
 
+@lru_cache(maxsize=256)
 def stream_sha256(seed: str, game_number: int, seat: str, roll_count: int) -> str:
     return hashlib.sha256(stream_content(seed, game_number, seat, roll_count)).hexdigest()
 
@@ -88,6 +90,7 @@ class SeatDiceController:
     roll_count: int
     files_per_match: int
     engine_by_seat: dict[str, str]
+    pair_id: str | None = None
     current_game_number: int = 1
     expected_next_roll_seat: str | None = None
     opening_attempt_index: dict[int, int] = field(default_factory=dict)
@@ -124,6 +127,9 @@ class SeatDiceController:
                 identities.append(
                     {
                         "namespace": self.side,
+                        "namespace_seed": self.seed,
+                        "base_seed": self.base_seed,
+                        "pair_id": self.pair_id,
                         "pair_member": self.side,
                         "match_side": self.side,
                         "game_number": game_number,
@@ -149,8 +155,12 @@ class SeatDiceController:
             {
                 "schema_version": SCHEMA_VERSION,
                 "namespace": self.side,
+                "namespace_seed": self.seed,
+                "base_seed": self.base_seed,
+                "pair_id": self.pair_id,
                 "pair_member": self.side,
                 "match_side": self.side,
+                "consumption_ordinal": len(self.consumption) + 1,
                 "game_number": game_number,
                 "prompt_type": prompt_type,
                 "roll_index": roll_index,
@@ -215,6 +225,8 @@ class SeatDiceController:
             "schema_version": SCHEMA_VERSION,
             "namespace": self.side,
             "namespace_seed": self.seed,
+            "base_seed": self.base_seed,
+            "pair_id": self.pair_id,
             "roll_count": self.roll_count,
             "files_per_match": self.files_per_match,
             "engine_by_physical_seat": self.engine_by_seat,

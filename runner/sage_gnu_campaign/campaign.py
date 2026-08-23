@@ -152,6 +152,10 @@ def publish_pair(
         _validate_complete_native_evidence(
             match,
             expected_engine_by_seat,
+            identity=identity,
+            match_side=side,
+            roll_count=config.data["dice"]["roll_count_per_game_seat"],
+            files_per_match=config.data["dice"]["files_per_match"],
         )
         match_manifests[side] = json.loads(
             (match / "match_manifest.json").read_text(encoding="utf-8")

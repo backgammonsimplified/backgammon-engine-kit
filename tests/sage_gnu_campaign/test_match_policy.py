@@ -24,6 +24,7 @@ from runner.sage_gnu_campaign.match import (
     _validate_native_outputs,
     _validate_opening_transition,
     _recommended_checker_notation,
+    canonical_gnu_dice,
     pending_double_response,
     pre_roll_cube_action,
 )
@@ -36,6 +37,20 @@ from tests.sage_gnu_campaign.native_fixtures import (
 REPO = Path(__file__).resolve().parents[2]
 CONFIG = REPO / "experiments/sage-gnu-campaign-v1/campaign.json"
 NATIVE_FIXTURES = Path(__file__).with_name("fixtures")
+
+
+@pytest.mark.parametrize(
+    ("stream_dice", "gnu_dice"),
+    [((4, 6), (6, 4)), ((6, 4), (6, 4)), ((3, 3), (3, 3))],
+)
+def test_canonical_gnu_dice_accepts_equivalent_stream_order(
+    stream_dice: tuple[int, int], gnu_dice: tuple[int, int],
+) -> None:
+    assert canonical_gnu_dice(*stream_dice) == canonical_gnu_dice(*gnu_dice)
+
+
+def test_canonical_gnu_dice_rejects_wrong_values() -> None:
+    assert canonical_gnu_dice(4, 6) != canonical_gnu_dice(5, 6)
 
 
 def test_board_environment_overrides_engine_kit_dev_null_home(tmp_path: Path) -> None:
@@ -645,18 +660,24 @@ def test_checker_move_reconciles_an_automatically_consumed_next_roll_exactly() -
         board=fake_board_state({13: 1}, {24: 1}, off_0=14, off_1=14),
     )
     after = position(
-        0, "player_1", "none", (4, 2),
+        0, "player_1", "none", (6, 4),
         board=fake_board_state({8: 1}, {24: 1}, off_0=14, off_1=14),
     )
     consumed = [{
         "prompt_type": "checker", "game_number": 1, "physical_seat": "X",
-        "engine": "gnu", "die1": 4, "die2": 2,
+        "engine": "gnu", "die1": 4, "die2": 6,
     }]
     _validate_command_transition(
         "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", None
     )
 
-    after.state.dice = (2, 4)
+    # The deterministic stream remains (4, 6), while GNU exposes (6, 4).
+    after.state.dice = (4, 6)
+    _validate_command_transition(
+        "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", None
+    )
+
+    after.state.dice = (6, 5)
     with pytest.raises(MatchExecutionError, match="wrong board, cube, action, dice, or turn"):
         _validate_command_transition(
             "13/8", before, after, consumed, 1, "O", "sage", mapping, "O", None

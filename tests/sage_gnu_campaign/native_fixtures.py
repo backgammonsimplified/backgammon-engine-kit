@@ -127,7 +127,10 @@ def _game_actions(
                 checker_indexes[seat] += 1
                 row = dice_record(seed, 1, 7, game_number, seat, checker_indexes[seat])
                 dice = [row["die1"], row["die2"]]
-            action["dice"] = dice
+            # Frozen GNU stores MatchID/native dice in descending order.  The
+            # deterministic consumption journal below intentionally retains
+            # the generator's original die1/die2 stream order.
+            action["dice"] = sorted(dice, reverse=True)
 
         checker_actions = {
             seat: [action for action in actions if action["action"] == "checker" and action["physical_seat"] == seat]

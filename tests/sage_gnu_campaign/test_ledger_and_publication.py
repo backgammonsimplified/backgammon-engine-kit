@@ -549,7 +549,7 @@ def test_publication_requires_authoritative_analysis_journals(
 
 
 @pytest.mark.parametrize(
-    "substitution", ["physical-seat", "engine", "stream", "cross-side"],
+    "substitution", ["physical-seat", "engine", "stream", "roll-index", "cross-side"],
 )
 def test_publication_rejects_equal_dice_collision_identity_substitution(
     tmp_path: Path, substitution: str,
@@ -565,11 +565,13 @@ def test_publication_rejects_equal_dice_collision_identity_substitution(
     other_seat = "X" if target["physical_seat"] == "O" else "O"
     collision_side = "B" if substitution == "cross-side" else "A"
     collision_seed = namespace_seed(identity.base_seed, collision_side)
+    collision_seat = target["physical_seat"] if substitution == "roll-index" else other_seat
     collision = next(
         (index, row) for index in range(1, 50001)
         if (row := dice_record(
-            collision_seed, 1, 7, target["game_number"], other_seat, index
+            collision_seed, 1, 7, target["game_number"], collision_seat, index
         ))["die1"] == target["die1"] and row["die2"] == target["die2"]
+        and index != target["roll_index"]
     )
     collision_index, _ = collision
     assert other_seat != target["physical_seat"]
@@ -582,6 +584,8 @@ def test_publication_rejects_equal_dice_collision_identity_substitution(
             collision_seed, target["game_number"], other_seat
         )
         target["stream_path"] = f"game_{target['game_number']:03d}_seat_{other_seat}.csv"
+    elif substitution == "roll-index":
+        target["roll_index"] = collision_index
     else:
         target.update({
             "namespace": "B", "namespace_seed": collision_seed,

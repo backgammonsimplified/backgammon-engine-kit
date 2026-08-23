@@ -86,6 +86,13 @@ SGF_UNSUPPORTED_STATE_PROPERTIES = {"CV", "CP", "DI"}
 NO_RETURNED_RESULT = object()
 
 
+def canonical_gnu_dice(die1: int, die2: int) -> tuple[int, int]:
+    """Return GNU's descending representation without changing stream evidence."""
+    if any(type(value) is not int or not 1 <= value <= 6 for value in (die1, die2)):
+        raise MatchExecutionError("GNU dice are missing or malformed")
+    return (die1, die2) if die1 >= die2 else (die2, die1)
+
+
 def _frozen_gnu_sgf_application(config: CampaignConfig) -> str:
     """Derive GNU's SGF AP identity from the verified frozen runtime identity."""
     runtime_version = config.data.get("engines", {}).get("gnu", {}).get(
@@ -1613,14 +1620,18 @@ def _validate_publication_dice(
             if (
                 dice_identity["physical_seat"] != seat
                 or dice_identity["engine"] != engine
-                or dice_identity["dice"] != native["dice"]
+                or canonical_gnu_dice(*dice_identity["dice"])
+                != canonical_gnu_dice(*native["dice"])
                 or dice_identity["stream_id"] != expected_stream
                 or dice_identity["stream_path"] != f"game_{game['game_number']:03d}_seat_{seat}.csv"
                 or decision.get("game_number") != dice_identity["game_number"]
                 or decision.get("action_ordinal") != dice_identity["action_ordinal"]
                 or decision.get("physical_seat") != dice_identity["physical_seat"]
                 or decision.get("engine") != dice_identity["engine"]
-                or decision.get("analysis_dice") != dice_identity["dice"]
+                or not isinstance(decision.get("analysis_dice"), list)
+                or len(decision["analysis_dice"]) != 2
+                or canonical_gnu_dice(*decision["analysis_dice"])
+                != canonical_gnu_dice(*dice_identity["dice"])
             ):
                 raise MatchExecutionError(
                     "checker dice semantic identity conflicts across decision, stream, and native evidence"
@@ -1845,7 +1856,7 @@ def _validate_opening_transition(
     )
     if on_roll != winner or decision_player != winner:
         raise MatchExecutionError("GNU opening winner differs from the decision/on-roll physical seat")
-    if observed_dice != expected_dice:
+    if canonical_gnu_dice(*observed_dice) != canonical_gnu_dice(*expected_dice):
         raise MatchExecutionError("GNU opening board dice differ from the consumed opening dice")
     if expected_next_roll_seat != loser:
         raise MatchExecutionError("GNU opening dice were misapplied to the physical-seat stream")
@@ -2468,7 +2479,12 @@ def _validate_command_transition(
         observed = _validate_consumed_checker_roll(
             consumed, game_number, physical_seat, engine_by_seat, expected_next_roll_seat, required=True
         )
-        if next_state.on_roll != actor or next_state.decision_player != actor or tuple(next_state.dice or ()) != observed:
+        if (
+            next_state.on_roll != actor
+            or next_state.decision_player != actor
+            or next_state.dice is None
+            or canonical_gnu_dice(*next_state.dice) != canonical_gnu_dice(*observed)
+        ):
             raise MatchExecutionError("GNU roll attached the wrong dice, physical seat, or turn owner")
         if next_board != previous_board or next_cube != previous_cube:
             raise MatchExecutionError("GNU roll changed checker or cube state")
@@ -2494,7 +2510,10 @@ def _validate_command_transition(
             next_board != previous_board
             or next_state.on_roll != other
             or next_state.decision_player != other
-            or (tuple(next_state.dice) if next_state.dice is not None else None) != observed
+            or next_state.dice is not None and observed is None
+            or next_state.dice is None and observed is not None
+            or next_state.dice is not None and observed is not None
+            and canonical_gnu_dice(*next_state.dice) != canonical_gnu_dice(*observed)
             or next_cube != expected_pending
         ):
             raise MatchExecutionError("GNU take produced the wrong cube, action, dice, or turn state")
@@ -2506,7 +2525,10 @@ def _validate_command_transition(
             next_board != expected_final_board
             or next_state.on_roll != other
             or next_state.decision_player != other
-            or (tuple(next_state.dice) if next_state.dice is not None else None) != observed
+            or next_state.dice is not None and observed is None
+            or next_state.dice is None and observed is not None
+            or next_state.dice is not None and observed is not None
+            and canonical_gnu_dice(*next_state.dice) != canonical_gnu_dice(*observed)
             or next_cube != empty_current_cube
         ):
             raise MatchExecutionError("GNU checker command produced the wrong board, cube, action, dice, or turn state")

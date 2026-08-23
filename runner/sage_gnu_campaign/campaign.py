@@ -161,6 +161,15 @@ def publish_pair(
             match_side=side,
             roll_count=config.data["dice"]["roll_count_per_game_seat"],
             files_per_match=config.data["dice"]["files_per_match"],
+            configured_targets={
+                engine: {
+                    decision_type: config.data["engines"][engine][
+                        f"{decision_type}_configured_target"
+                    ]
+                    for decision_type in ("checker", "cube")
+                }
+                for engine in ("sage", "gnu")
+            },
         )
         match_manifests[side] = json.loads(
             (match / "match_manifest.json").read_text(encoding="utf-8")

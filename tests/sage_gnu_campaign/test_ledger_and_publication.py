@@ -428,6 +428,124 @@ def test_publication_requires_exact_connected_decision_state_machine(
 @pytest.mark.parametrize(
     "case",
     [
+        "missing-request", "missing-result", "duplicate", "reordered",
+        "wrong-decision-association", "wrong-engine", "wrong-seat", "wrong-gnuid",
+        "wrong-type", "malformed-result", "wrong-configured-depth",
+        "invalid-actual-depth", "cross-side", "cross-game", "cross-pair",
+        "missing-raw-source", "malformed-candidates", "wrong-manifest-path",
+        "manifest-file-hash-mismatch",
+    ],
+)
+def test_publication_requires_authoritative_analysis_journals(
+    tmp_path: Path, case: str,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    write_execution_fixture(execution, identity)
+    match = execution / "matches/A"
+    request_path = match / "analysis_requests.jsonl"
+    result_path = match / "analysis_results.jsonl"
+    decision_path = match / "decisions.jsonl"
+    manifest_path = match / "match_manifest.json"
+    requests = [json.loads(line) for line in request_path.read_text().splitlines()]
+    results = [json.loads(line) for line in result_path.read_text().splitlines()]
+    decisions = [json.loads(line) for line in decision_path.read_text().splitlines()]
+
+    if case == "missing-request":
+        requests.pop()
+    elif case == "missing-result":
+        results.pop()
+    elif case == "duplicate":
+        requests.insert(1, dict(requests[0]))
+        results.insert(1, dict(results[0]))
+    elif case == "reordered":
+        requests[0], requests[1] = requests[1], requests[0]
+        results[0], results[1] = results[1], results[0]
+    elif case == "wrong-decision-association":
+        requests[0]["decision_ordinal"] = requests[1]["decision_ordinal"]
+        results[0]["decision_ordinal"] = results[1]["decision_ordinal"]
+    elif case in {"wrong-engine", "wrong-seat", "wrong-gnuid", "wrong-type"}:
+        key, value = {
+            "wrong-engine": ("engine", "gnu"),
+            "wrong-seat": ("physical_seat", "X"),
+            "wrong-gnuid": ("gnuid", decisions[-1]["gnuid"]),
+            "wrong-type": ("decision_type", "cube"),
+        }[case]
+        requests[0][key] = value
+        results[0][key] = value
+    elif case == "malformed-result":
+        results[0]["returned_result"] = "malformed"
+    elif case == "wrong-configured-depth":
+        results[0]["returned_result"]["engine"]["analysis_setting"] = "2ply"
+        decisions[0]["engine_kit_result"]["engine"]["analysis_setting"] = "2ply"
+    elif case == "invalid-actual-depth":
+        raw = results[0]["returned_result"]
+        raw["checker_decision"]["actual_ply"] = -1
+        raw["checker_decision"]["candidates"][0]["actual_ply"] = -1
+        validated = decisions[0]["engine_kit_result"]
+        validated["checker_decision"] = raw["checker_decision"]
+        validated["campaign_depth_evidence"]["recommended_actual_ply"] = -1
+        validated["campaign_depth_evidence"]["candidate_actual_plies"] = [-1]
+    elif case in {"cross-side", "cross-game", "cross-pair"}:
+        key, value = {
+            "cross-side": ("match_side", "B"),
+            "cross-game": ("game_number", 2),
+            "cross-pair": ("pair_id", "pair-" + "0" * 24),
+        }[case]
+        requests[0][key] = value
+        results[0][key] = value
+    elif case == "missing-raw-source":
+        results[0]["returned_result"].pop("raw_source")
+        decisions[0]["engine_kit_result"].pop("raw_source")
+    elif case == "malformed-candidates":
+        raw = results[0]["returned_result"]
+        raw["checker_decision"]["candidates"].append(
+            dict(raw["checker_decision"]["candidates"][0])
+        )
+        decisions[0]["engine_kit_result"]["checker_decision"] = raw["checker_decision"]
+        decisions[0]["engine_kit_result"]["campaign_depth_evidence"][
+            "candidate_actual_plies"
+        ].append(raw["checker_decision"]["actual_ply"])
+    elif case == "wrong-manifest-path":
+        manifest = json.loads(manifest_path.read_text())
+        manifest["analysis_request_evidence"] = "wrong.jsonl"
+        write_json(manifest_path, manifest)
+    elif case == "manifest-file-hash-mismatch":
+        requests[0]["engine"] = "gnu"
+
+    request_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in requests),
+        encoding="utf-8",
+    )
+    result_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in results),
+        encoding="utf-8",
+    )
+    decision_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in decisions),
+        encoding="utf-8",
+    )
+    if case not in {"wrong-manifest-path", "manifest-file-hash-mismatch"}:
+        manifest = json.loads(manifest_path.read_text())
+        for path in (request_path, result_path, decision_path):
+            manifest["output_sha256"][str(path.relative_to(match))] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+        write_json(manifest_path, manifest)
+
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    with pytest.raises(MatchExecutionError, match="analysis|manifest"):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
         "text-truncated-after-game-1",
         "text-missing-final-game",
         "text-missing-middle-game",

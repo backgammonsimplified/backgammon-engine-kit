@@ -624,6 +624,87 @@ def write_complete_match(
         "".join(json.dumps(record, sort_keys=True) + "\n" for record in decisions),
         encoding="utf-8",
     )
+
+    analysis_requests: list[dict[str, Any]] = []
+    analysis_results: list[dict[str, Any]] = []
+    for decision in decisions:
+        decision_type = decision["decision_type"]
+        if decision_type not in {"checker", "cube"}:
+            continue
+        request_ordinal = len(analysis_requests) + 1
+        context = {
+            "campaign_id": identity.campaign_id, "pair_id": identity.pair_id,
+            "pair_index": identity.pair_index, "pair_member": side, "match_side": side,
+            "game_number": decision["game_number"], "request_ordinal": request_ordinal,
+            "decision_ordinal": decision["decision_ordinal"],
+            "physical_seat": decision["physical_seat"], "engine": decision["engine"],
+            "decision_type": decision_type, "gnuid": decision["gnuid"],
+            "dice": decision["analysis_dice"],
+        }
+        target = FROZEN_CONFIG.data["engines"][decision["engine"]][
+            f"{decision_type}_configured_target"
+        ]
+        configured_ply = int(target.removesuffix("ply"))
+        actual_ply = (
+            configured_ply - 1
+            if decision["engine"] == "gnu" and decision_type == "checker"
+            else configured_ply
+        )
+        if decision_type == "checker":
+            decision_result: dict[str, Any] = {
+                "actual_ply": actual_ply, "recommended_move_id": "fixture-move",
+                "candidates": [{
+                    "move_id": "fixture-move", "actual_ply": actual_ply,
+                    "notation": decision["command"],
+                }],
+            }
+            checker_decision, cube_decision = decision_result, None
+            candidate_actuals: list[int] | None = [actual_ply]
+        else:
+            decision_result = {
+                "actual_ply": actual_ply,
+                "recommendation": decision["command"],
+            }
+            checker_decision, cube_decision = None, decision_result
+            candidate_actuals = None
+        raw_text = f"fixture raw result {side} {request_ordinal}"
+        raw = {
+            "position": {"id": decision["gnuid"], "format": "gnuid"},
+            "engine": {"name": decision["engine"], "analysis_setting": target},
+            "decision_type": decision_type, "status": "complete",
+            "checker_decision": checker_decision, "cube_decision": cube_decision,
+            "raw_source": {
+                "inline": raw_text,
+                "content_sha256": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+            },
+            "failure": None,
+        }
+        decision["engine_kit_result"] = {
+            **raw,
+            "campaign_depth_evidence": {
+                "configured_target": target,
+                "recommended_actual_ply": actual_ply,
+                "candidate_actual_plies": candidate_actuals,
+            },
+        }
+        analysis_requests.append(context)
+        analysis_results.append({**context, "returned_result": raw})
+
+    decision_path = match / "decisions.jsonl"
+    decision_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in decisions),
+        encoding="utf-8",
+    )
+    request_path = match / "analysis_requests.jsonl"
+    result_path = match / "analysis_results.jsonl"
+    request_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in analysis_requests),
+        encoding="utf-8",
+    )
+    result_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in analysis_results),
+        encoding="utf-8",
+    )
     write_json(dice / "seat_dice_manifest.json", {
         "schema_version": "physical-seat-dice-stream-v1",
         "namespace": side,
@@ -665,8 +746,18 @@ def write_complete_match(
         "dice_manifest": "dice/seat_dice_manifest.json",
         "dice_consumption": "dice/seat_dice_consumption.jsonl",
         "candidate_actual_depth_evidence": "decisions.jsonl",
+        "analysis_request_evidence": "analysis_requests.jsonl",
+        "analysis_result_evidence": "analysis_results.jsonl",
         "native_outputs": ["native/match.sgf", "native/match.txt"],
         "native_evidence": summary,
+    }
+    output_paths = [
+        match / "native/match.sgf", match / "native/match.txt", decision_path,
+        dice / "seat_dice_manifest.json", consumption, request_path, result_path,
+    ]
+    manifest["output_sha256"] = {
+        str(path.relative_to(match)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in output_paths
     }
     write_json(match / "match_manifest.json", manifest)
     return manifest

@@ -27,7 +27,12 @@ from .dice import (
     stream_id,
     stream_sha256,
 )
-from .engine_kit import EngineKitSession, analysis_result_forensics
+from .engine_kit import (
+    EngineKitMismatch,
+    EngineKitSession,
+    analysis_result_forensics,
+    validate_actual_depth_evidence,
+)
 from .identity import PairIdentity
 from .manifests import fsync_directory, sha256_file, write_json
 
@@ -847,6 +852,7 @@ def _validate_complete_native_evidence(
     match_side: str | None = None,
     roll_count: int | None = None,
     files_per_match: int | None = None,
+    configured_targets: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Reconcile the complete native match against every numbered journal."""
     match_root = Path(match_root)
@@ -948,15 +954,23 @@ def _validate_complete_native_evidence(
         for game_number in expected_numbers for seat in ("O", "X")
     ):
         raise MatchExecutionError("deterministic dice manifest lacks native-game seat streams")
-    authority = (identity, match_side, roll_count, files_per_match)
+    authority = (identity, match_side, roll_count, files_per_match, configured_targets)
     if any(value is not None for value in authority):
         if any(value is None for value in authority):
             raise MatchExecutionError("publication dice authority is incomplete")
         assert identity is not None and match_side is not None
         assert roll_count is not None and files_per_match is not None
+        assert configured_targets is not None
+        requests = _read_jsonl_evidence(
+            match_root / "analysis_requests.jsonl", "analysis request journal"
+        )
+        results = _read_jsonl_evidence(
+            match_root / "analysis_results.jsonl", "analysis result journal"
+        )
         _validate_publication_journals(
             match_root, summary, manifest, decisions, dice_manifest, consumption,
-            expected_engine_by_seat, identity, match_side, roll_count, files_per_match,
+            requests, results, expected_engine_by_seat, identity, match_side,
+            roll_count, files_per_match, configured_targets,
         )
     return summary
 
@@ -1407,6 +1421,117 @@ def _validate_publication_dice(
             raise MatchExecutionError("native checker dice sequence conflicts with deterministic journal")
 
 
+def _validate_publication_analysis(
+    requests: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+    expected_engine_by_seat: Mapping[str, str],
+    identity: PairIdentity,
+    match_side: str,
+    configured_targets: Mapping[str, Mapping[str, str]],
+) -> None:
+    analyzed_decisions = [
+        record for record in decisions if record.get("decision_type") in {"checker", "cube"}
+    ]
+    if len(requests) != len(results) or len(requests) != len(analyzed_decisions):
+        raise MatchExecutionError("analysis journals do not map one-to-one to decisions")
+    expected_authority = {
+        "campaign_id": identity.campaign_id,
+        "pair_id": identity.pair_id,
+        "pair_index": identity.pair_index,
+        "pair_member": match_side,
+        "match_side": match_side,
+    }
+    previous_decision_ordinal = 0
+    for request_ordinal, (request, result, decision) in enumerate(
+        zip(requests, results, analyzed_decisions), 1
+    ):
+        decision_ordinal = decision.get("decision_ordinal")
+        seat = decision.get("physical_seat")
+        engine = decision.get("engine")
+        decision_type = decision.get("decision_type")
+        expected_context = {
+            **expected_authority,
+            "game_number": decision.get("game_number"),
+            "request_ordinal": request_ordinal,
+            "decision_ordinal": decision_ordinal,
+            "physical_seat": seat,
+            "engine": engine,
+            "decision_type": decision_type,
+            "gnuid": decision.get("gnuid"),
+            "dice": decision.get("analysis_dice"),
+        }
+        if (
+            type(decision_ordinal) is not int
+            or decision_ordinal <= previous_decision_ordinal
+            or seat not in {"O", "X"}
+            or engine != expected_engine_by_seat[seat]
+            or request != expected_context
+            or any(result.get(key) != value for key, value in expected_context.items())
+            or set(result) != {*expected_context, "returned_result"}
+        ):
+            raise MatchExecutionError("analysis journal ordering or decision association is invalid")
+        previous_decision_ordinal = decision_ordinal
+        raw = result.get("returned_result")
+        validated = decision.get("engine_kit_result")
+        if not isinstance(raw, dict) or not isinstance(validated, dict):
+            raise MatchExecutionError("analysis result evidence is malformed")
+        validated_without_depth = dict(validated)
+        depth = validated_without_depth.pop("campaign_depth_evidence", None)
+        if validated_without_depth != raw or not isinstance(depth, dict):
+            raise MatchExecutionError("raw and validated Engine Kit result evidence conflict")
+        expected_target = configured_targets.get(str(engine), {}).get(str(decision_type))
+        if (
+            not isinstance(expected_target, str)
+            or re.fullmatch(r"\d+ply", expected_target) is None
+            or raw.get("status") != "complete"
+            or raw.get("position") != {"id": decision["gnuid"], "format": "gnuid"}
+            or raw.get("decision_type") != decision_type
+            or not isinstance(raw.get("engine"), dict)
+            or raw["engine"].get("name") != engine
+            or raw["engine"].get("analysis_setting") != expected_target
+            or not isinstance(raw.get("raw_source"), dict)
+            or not raw["raw_source"]
+        ):
+            raise MatchExecutionError("analysis result conflicts with request/configured authority")
+        decision_key = f"{decision_type}_decision"
+        decision_evidence = raw.get(decision_key)
+        other_key = "cube_decision" if decision_type == "checker" else "checker_decision"
+        if not isinstance(decision_evidence, dict) or raw.get(other_key) is not None:
+            raise MatchExecutionError("analysis result carries malformed decision semantics")
+        actual_ply = decision_evidence.get("actual_ply")
+        candidate_actuals: list[int | None] | None = None
+        if decision_type == "checker":
+            candidates = decision_evidence.get("candidates")
+            recommended = decision_evidence.get("recommended_move_id")
+            if (
+                not isinstance(candidates, list)
+                or not candidates
+                or not isinstance(recommended, str)
+                or any(not isinstance(candidate, dict) for candidate in candidates)
+                or len({candidate.get("move_id") for candidate in candidates}) != len(candidates)
+                or recommended not in {candidate.get("move_id") for candidate in candidates}
+            ):
+                raise MatchExecutionError("checker analysis result/candidates are malformed")
+            candidate_actuals = [candidate.get("actual_ply") for candidate in candidates]
+        elif not isinstance(decision_evidence.get("recommendation"), str):
+            raise MatchExecutionError("cube analysis result is malformed")
+        configured_ply = int(expected_target.removesuffix("ply"))
+        expected_depth = {
+            "configured_target": expected_target,
+            "recommended_actual_ply": actual_ply,
+            "candidate_actual_plies": candidate_actuals,
+        }
+        if depth != expected_depth:
+            raise MatchExecutionError("decision depth evidence conflicts with raw analysis result")
+        try:
+            validate_actual_depth_evidence(
+                str(engine), str(decision_type), configured_ply, actual_ply, candidate_actuals
+            )
+        except EngineKitMismatch as exc:
+            raise MatchExecutionError("analysis result violates the live depth policy") from exc
+
+
 def _validate_publication_journals(
     match_root: Path,
     summary: Mapping[str, Any],
@@ -1414,24 +1539,45 @@ def _validate_publication_journals(
     decisions: list[dict[str, Any]],
     dice_manifest: Mapping[str, Any],
     consumption: list[dict[str, Any]],
+    requests: list[dict[str, Any]],
+    results: list[dict[str, Any]],
     expected_engine_by_seat: Mapping[str, str],
     identity: PairIdentity,
     match_side: str,
     roll_count: int,
     files_per_match: int,
+    configured_targets: Mapping[str, Mapping[str, str]],
 ) -> None:
     if (
         manifest.get("side") != match_side
         or manifest.get("pair_member") != match_side
         or manifest.get("namespace_seed") != namespace_seed(identity.base_seed, match_side)
+        or manifest.get("analysis_request_evidence") != "analysis_requests.jsonl"
+        or manifest.get("analysis_result_evidence") != "analysis_results.jsonl"
     ):
         raise MatchExecutionError("match manifest conflicts with publication pair/side authority")
+    required_outputs = {
+        "native/match.sgf", "native/match.txt", "decisions.jsonl",
+        "dice/seat_dice_manifest.json", "dice/seat_dice_consumption.jsonl",
+        "analysis_requests.jsonl", "analysis_results.jsonl",
+    }
+    output_hashes = manifest.get("output_sha256")
+    if not isinstance(output_hashes, dict) or set(output_hashes) != required_outputs:
+        raise MatchExecutionError("match manifest output hash inventory is incomplete")
+    for relative in sorted(required_outputs):
+        path = match_root / relative
+        if not path.is_file() or output_hashes.get(relative) != sha256_file(path):
+            raise MatchExecutionError("match manifest output hash conflicts with publication file")
     _validate_publication_dice(
         match_root, summary, dice_manifest, consumption, expected_engine_by_seat,
         identity, match_side, roll_count, files_per_match,
     )
     _validate_publication_decisions(
         summary, decisions, consumption, expected_engine_by_seat, identity, match_side
+    )
+    _validate_publication_analysis(
+        requests, results, decisions, expected_engine_by_seat, identity, match_side,
+        configured_targets,
     )
 
 
@@ -2266,6 +2412,8 @@ class PairExecutor:
         decision_type: str,
         gnuid: str,
         dice_values: tuple[int, int] | None,
+        request_ordinal: int,
+        decision_ordinal: int,
     ) -> dict[str, Any]:
         return {
             "campaign_id": identity.campaign_id,
@@ -2274,6 +2422,8 @@ class PairExecutor:
             "pair_member": side,
             "match_side": side,
             "game_number": game_number,
+            "request_ordinal": request_ordinal,
+            "decision_ordinal": decision_ordinal,
             "physical_seat": physical_seat,
             "engine": engine,
             "decision_type": decision_type,
@@ -2362,9 +2512,12 @@ class PairExecutor:
         decision_type: str,
         gnuid: str,
         dice_values: tuple[int, int] | None,
+        request_ordinal: int,
+        decision_ordinal: int,
     ) -> tuple[Any, dict[str, Any]]:
         request_record = self._analysis_context(
-            identity, side, game_number, physical_seat, engine, decision_type, gnuid, dice_values
+            identity, side, game_number, physical_seat, engine, decision_type, gnuid,
+            dice_values, request_ordinal, decision_ordinal,
         )
         _append_jsonl_durable(match_root / "analysis_requests.jsonl", request_record)
         try:
@@ -2445,6 +2598,7 @@ class PairExecutor:
         _create_empty_file_durable(request_path)
         _create_empty_file_durable(result_path)
         decisions = 0
+        analysis_requests = 0
         game_number = 1
         completed = False
         primary_error: BaseException | None = None
@@ -2497,9 +2651,12 @@ class PairExecutor:
                         record = {"status": "board-rule", "action": "accept-resignation"}
                     elif pending == "double":
                         decision_type = "cube"
+                        analysis_requests += 1
                         record, analysis_context = self._analyze_with_forensics(
                             identity, side, match_root, game_number, physical_seat,
                             engine, decision_type, gnuid, None,
+                            analysis_requests,
+                            decisions,
                         )
                         try:
                             command = pending_double_response(record["cube_decision"])
@@ -2512,9 +2669,12 @@ class PairExecutor:
                         )
                     elif dice_values is None:
                         decision_type = "cube"
+                        analysis_requests += 1
                         record, analysis_context = self._analyze_with_forensics(
                             identity, side, match_root, game_number, physical_seat,
                             engine, decision_type, gnuid, None,
+                            analysis_requests,
+                            decisions,
                         )
                         try:
                             command = pre_roll_cube_action(record["cube_decision"])
@@ -2524,9 +2684,12 @@ class PairExecutor:
                     else:
                         decision_type = "checker"
                         analysis_dice = tuple(int(value) for value in dice_values)
+                        analysis_requests += 1
                         record, analysis_context = self._analyze_with_forensics(
                             identity, side, match_root, game_number, physical_seat,
                             engine, decision_type, gnuid, analysis_dice,
+                            analysis_requests,
+                            decisions,
                         )
                         try:
                             command = _recommended_checker_notation(record)

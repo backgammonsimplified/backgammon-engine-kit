@@ -169,6 +169,8 @@ def test_real_session_boundary_journals_returned_result_before_depth_validation(
             "checker",
             "position:match",
             (3, 1),
+            7,
+            9,
         )
 
     request = json.loads((match_root / "analysis_requests.jsonl").read_text(encoding="utf-8"))
@@ -258,6 +260,8 @@ def test_primitive_malformed_results_preserve_primary_contract_failure_and_evide
             "checker",
             "position:match",
             (3, 1),
+            1,
+            1,
         )
     assert caught.value is primary
 

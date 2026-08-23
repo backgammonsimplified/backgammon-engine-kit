@@ -17,6 +17,7 @@ from runner.sage_gnu_campaign.manifests import (
     write_json,
 )
 from runner.sage_gnu_campaign.match import MatchExecutionError
+from tests.sage_gnu_campaign.native_fixtures import native_documents, write_execution_fixture
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -89,32 +90,14 @@ def test_config_or_commit_mismatch_fails_closed(tmp_path: Path) -> None:
 
 
 def execution_fixture(root: Path, identity) -> None:
-    (root / "matches" / "A").mkdir(parents=True)
-    (root / "matches" / "B").mkdir(parents=True)
-    for side, sage_seat, gnu_seat in (("A", "O", "X"), ("B", "X", "O")):
-        match = root / "matches" / side
-        (match / "decisions.jsonl").write_text("{}\n", encoding="utf-8")
-        native = match / "native"
-        native.mkdir()
-        (native / "match.sgf").write_text(
-            "(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7][game:0])\n",
-            encoding="utf-8",
-        )
-        (native / "match.txt").write_text(
-            f"7 point match\n\n Game 1\n sage_seat_{sage_seat} : 0  gnu_seat_{gnu_seat} : 0\n",
-            encoding="utf-8",
-        )
-    write_json(
-        root / "execution_result.json",
-        {
-            "status": "complete",
-            "pair_identity": identity.to_dict(),
-            "matches": [
-                {"side": "A", "engine_by_physical_seat": {"O": "sage", "X": "gnu"}},
-                {"side": "B", "engine_by_physical_seat": {"O": "gnu", "X": "sage"}},
-            ],
-        },
-    )
+    write_execution_fixture(root, identity)
+
+
+def publication_common() -> dict[str, object]:
+    return {
+        "benchmarker": {"commit": BENCHMARKER_COMMIT},
+        "engine_kit": {"source_commit": ENGINE_KIT_COMMIT},
+    }
 
 
 def test_committed_pair_is_verified_and_never_regenerated(tmp_path: Path) -> None:
@@ -176,6 +159,132 @@ def test_publication_rejects_invalid_native_gnu_output(tmp_path: Path) -> None:
             {"attempt_count": 1, "transitions": []},
         )
     assert not (tmp_path / "artifacts" / config.campaign_id / "pairs" / identity.pair_id).exists()
+
+
+def test_publication_accepts_complete_real_shaped_multi_game_native_evidence(tmp_path: Path) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    write_execution_fixture(execution, identity, [("O", 2), ("X", 1), ("O", 6)])
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    marker = publish_pair(
+        execution, artifact_root, config, identity, publication_common(),
+        {"attempt_count": 1, "transitions": []},
+    )
+    assert len(marker) == 64
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "text-truncated-after-game-1",
+        "text-missing-final-game",
+        "text-missing-middle-game",
+        "sgf-one-text-multi",
+        "sgf-multi-text-one",
+        "sgf-missing-middle-game",
+        "sgf-ordering-gap",
+        "sgf-duplicated-game",
+        "sgf-text-result-mismatch",
+        "sgf-text-score-progression-mismatch",
+        "duplicated-game-block",
+        "preamble-identity",
+        "trailer-identity",
+        "dice-game-count-mismatch",
+        "decision-game-count-mismatch",
+        "decision-result-mismatch",
+        "match-manifest-result-mismatch",
+    ],
+)
+def test_publication_rejects_incomplete_or_cross_format_native_game_evidence(
+    tmp_path: Path, case: str,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    games = [("O", 2), ("X", 1), ("O", 6)]
+    write_execution_fixture(execution, identity, games)
+    match = execution / "matches/A"
+    sgf_path = match / "native/match.sgf"
+    text_path = match / "native/match.txt"
+    text = text_path.read_text(encoding="utf-8")
+    mapping = {"O": "sage", "X": "gnu"}
+    one_sgf, one_text, _ = native_documents(mapping, [("O", 8)])
+
+    game_2 = text.index("\n Game 2")
+    game_3 = text.index("\n Game 3")
+    if case == "text-truncated-after-game-1":
+        text_path.write_text(text[:game_2], encoding="utf-8")
+    elif case == "text-missing-final-game":
+        text_path.write_text(text[:game_3], encoding="utf-8")
+    elif case == "text-missing-middle-game":
+        text_path.write_text(text[:game_2] + text[game_3:], encoding="utf-8")
+    elif case == "sgf-one-text-multi":
+        sgf_path.write_text(one_sgf, encoding="utf-8")
+    elif case == "sgf-multi-text-one":
+        text_path.write_text(one_text, encoding="utf-8")
+    elif case == "sgf-missing-middle-game":
+        trees = sgf_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        sgf_path.write_text(trees[0] + trees[2], encoding="utf-8")
+    elif case == "sgf-ordering-gap":
+        sgf_path.write_text(
+            sgf_path.read_text(encoding="utf-8").replace("[game:1]", "[game:3]", 1),
+            encoding="utf-8",
+        )
+    elif case == "sgf-duplicated-game":
+        trees = sgf_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        sgf_path.write_text(trees[0] + trees[1] + trees[1] + trees[2], encoding="utf-8")
+    elif case == "sgf-text-result-mismatch":
+        sgf_path.write_text(
+            sgf_path.read_text(encoding="utf-8").replace("RE[W+6]", "RE[W+5]"),
+            encoding="utf-8",
+        )
+    elif case == "sgf-text-score-progression-mismatch":
+        text_path.write_text(text.replace("sage_seat_O : 2", "sage_seat_O : 3", 1), encoding="utf-8")
+    elif case == "duplicated-game-block":
+        text_path.write_text(text[:game_3] + text[game_2:game_3] + text[game_3:], encoding="utf-8")
+    elif case == "preamble-identity":
+        text_path.write_text("sage_seat_O : 0\n" + text, encoding="utf-8")
+    elif case == "trailer-identity":
+        text_path.write_text(text + "\ngnu_seat_X : 1\n", encoding="utf-8")
+    elif case == "dice-game-count-mismatch":
+        consumption = match / "dice/seat_dice_consumption.jsonl"
+        records = [json.loads(line) for line in consumption.read_text(encoding="utf-8").splitlines()]
+        consumption.write_text(
+            "".join(json.dumps(record) + "\n" for record in records if record["game_number"] != 3),
+            encoding="utf-8",
+        )
+    elif case == "decision-game-count-mismatch":
+        decisions = match / "decisions.jsonl"
+        records = [json.loads(line) for line in decisions.read_text(encoding="utf-8").splitlines()]
+        decisions.write_text(
+            "".join(json.dumps(record) + "\n" for record in records if record["game_number"] != 2),
+            encoding="utf-8",
+        )
+    elif case == "decision-result-mismatch":
+        decisions = match / "decisions.jsonl"
+        records = [json.loads(line) for line in decisions.read_text(encoding="utf-8").splitlines()]
+        records[1]["transition_evidence"]["terminal_event"]["points"] = 2
+        decisions.write_text(
+            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+        )
+    elif case == "match-manifest-result-mismatch":
+        manifest_path = match / "match_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["native_evidence"]["games"][0]["points"] = 3
+        write_json(manifest_path, manifest)
+    else:  # pragma: no cover
+        raise AssertionError(case)
+
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    with pytest.raises(MatchExecutionError):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
+    assert not (artifact_root / config.campaign_id / "pairs" / identity.pair_id).exists()
 
 
 def test_publication_durably_links_real_hierarchy_before_success(

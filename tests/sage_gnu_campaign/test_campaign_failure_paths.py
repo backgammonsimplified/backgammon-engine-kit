@@ -13,6 +13,7 @@ from runner.sage_gnu_campaign.config import load_campaign_config
 from runner.sage_gnu_campaign.identity import pair_identity
 from runner.sage_gnu_campaign.ledger import CampaignLedger
 from runner.sage_gnu_campaign.manifests import common_manifest, write_json
+from tests.sage_gnu_campaign.native_fixtures import write_execution_fixture
 
 REPO = Path(__file__).resolve().parents[2]
 CONFIG = REPO / "experiments/sage-gnu-campaign-v1/campaign.json"
@@ -128,23 +129,7 @@ def test_verified_published_pair_reconciles_from_failed_without_executor(tmp_pat
     ledger.transition(identity.pair_id, "started", reason="start", attempt=1)
     ledger.transition(identity.pair_id, "failed", reason="legacy", attempt=1)
     execution = tmp_path / "execution"
-    (execution / "matches/A").mkdir(parents=True)
-    (execution / "matches/B").mkdir(parents=True)
-    for side, sage_seat, gnu_seat in (("A", "O", "X"), ("B", "X", "O")):
-        match = execution / "matches" / side
-        (match / "decisions.jsonl").write_text("{}\n")
-        native = match / "native"
-        native.mkdir()
-        (native / "match.sgf").write_text(
-            "(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7][game:0])\n"
-        )
-        (native / "match.txt").write_text(
-            f"7 point match\n\n Game 1\n sage_seat_{sage_seat} : 0  gnu_seat_{gnu_seat} : 0\n"
-        )
-    write_json(execution / "execution_result.json", {
-        "status": "complete", "pair_identity": identity.to_dict(),
-        "matches": [{"side": "A"}, {"side": "B"}],
-    })
+    write_execution_fixture(execution, identity)
     common = common_manifest(config, report(config)["benchmarker"], report(config)["engine_kit"], {}, report(config)["runner_environment"])
     publish_pair(execution, artifacts, config, identity, common, {"attempt_count": 1, "transitions": []})
     (root / config.data["bounds"]["stop_requested_file"]).write_text("stop\n", encoding="utf-8")

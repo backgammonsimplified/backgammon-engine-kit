@@ -44,8 +44,11 @@ TERMINAL_RESIGN_RE = re.compile(
 TEXT_MATCH_RE = re.compile(r"(?im)\b(?:\d+\s+point\s+match|match\s+to\s+\d+\s+points?)\b")
 TEXT_GAME_RE = re.compile(r"(?im)^\s*game\s+(\d+)\b")
 TEXT_PLAYER_SCORE_RE = re.compile(
-    r"(?im)\b([A-Za-z][A-Za-z0-9_-]*)_seat_([OX])\s*:\s*\d+\b"
+    r"(?im)\b([A-Za-z][A-Za-z0-9_-]*)_seat_([OX])\s*:\s*(\d+)\b"
 )
+TEXT_IDENTITY_RE = re.compile(r"(?im)\b[A-Za-z][A-Za-z0-9_-]*_seat_[OX]\s*:")
+TEXT_RESULT_RE = re.compile(r"(?im)^(?P<indent>[ \t]*)wins\s+(\d+)\s+points?\s*$")
+SGF_RESULT_RE = re.compile(r"^([WB])\+(\d+)(R(?:esign)?)?$", re.IGNORECASE)
 NO_RETURNED_RESULT = object()
 
 
@@ -155,51 +158,33 @@ def _validate_native_outputs(
     sgf_path: Path,
     text_path: Path,
     expected_engine_by_seat: Mapping[str, str],
-) -> None:
+) -> dict[str, Any]:
     try:
         sgf = sgf_path.read_text(encoding="utf-8-sig")
         exported = text_path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeError) as exc:
         raise MatchExecutionError("GNU native outputs are absent or unreadable") from exc
-    stripped_sgf = sgf.strip()
     if (
-        len(stripped_sgf) < 24
-        or not stripped_sgf.startswith("(;")
-        or not stripped_sgf.endswith(")")
-        or not _sgf_delimiters_are_balanced(stripped_sgf)
-        or "FF[4]" not in stripped_sgf
-        or "GM[6]" not in stripped_sgf
-        or "AP[GNU Backgammon:" not in stripped_sgf
-        or "MI[length:7]" not in stripped_sgf
-    ):
-        raise MatchExecutionError("GNU saved SGF is empty or structurally invalid")
-    game_headers = list(TEXT_GAME_RE.finditer(exported))
-    expected_player_scores = sorted(
-        (engine, seat) for seat, engine in expected_engine_by_seat.items()
-    )
-    if (
-        len(exported.strip()) < 24
-        or "\x00" in exported
-        or TEXT_MATCH_RE.search(exported) is None
-        or not game_headers
-        or set(expected_engine_by_seat) != {"O", "X"}
+        set(expected_engine_by_seat) != {"O", "X"}
         or set(expected_engine_by_seat.values()) != {"sage", "gnu"}
-        or [int(header.group(1)) for header in game_headers]
-        != list(range(1, len(game_headers) + 1))
     ):
-        raise MatchExecutionError("GNU exported match text is empty or structurally invalid")
-    for index, header in enumerate(game_headers):
-        block_end = game_headers[index + 1].start() if index + 1 < len(game_headers) else len(exported)
-        player_scores = TEXT_PLAYER_SCORE_RE.findall(exported[header.end():block_end])
-        if sorted(player_scores) != expected_player_scores:
-            raise MatchExecutionError("GNU exported match text is empty or structurally invalid")
+        raise MatchExecutionError("GNU native player authority is invalid")
+    sgf_games = _parse_sgf_match(sgf.strip(), expected_engine_by_seat)
+    text_games = _parse_text_match(exported, expected_engine_by_seat)
+    if sgf_games != text_games:
+        raise MatchExecutionError("GNU SGF/text game collections or results do not match")
+    return {"game_count": len(sgf_games), "games": sgf_games, "final_score": sgf_games[-1]["post_score"]}
 
 
-def _sgf_delimiters_are_balanced(value: str) -> bool:
-    tree_depth = 0
+def _split_sgf_collection(value: str) -> list[str]:
+    if len(value) < 24 or "\x00" in value:
+        raise MatchExecutionError("GNU saved SGF is empty or structurally invalid")
+    trees: list[str] = []
+    depth = 0
+    start: int | None = None
     in_property = False
     escaped = False
-    for character in value:
+    for index, character in enumerate(value):
         if in_property:
             if escaped:
                 escaped = False
@@ -210,15 +195,323 @@ def _sgf_delimiters_are_balanced(value: str) -> bool:
             continue
         if character == "[":
             in_property = True
-        elif character == "]":
-            return False
         elif character == "(":
-            tree_depth += 1
+            if depth == 0:
+                start = index
+            depth += 1
         elif character == ")":
-            tree_depth -= 1
-            if tree_depth < 0:
-                return False
-    return tree_depth == 0 and not in_property and not escaped
+            depth -= 1
+            if depth < 0:
+                raise MatchExecutionError("GNU saved SGF is empty or structurally invalid")
+            if depth == 0:
+                if start is None:
+                    raise MatchExecutionError("GNU saved SGF is empty or structurally invalid")
+                trees.append(value[start:index + 1])
+                start = None
+        elif depth == 0 and not character.isspace():
+            raise MatchExecutionError("GNU saved SGF has data outside game trees")
+    if depth or in_property or escaped or start is not None or not trees:
+        raise MatchExecutionError("GNU saved SGF is empty or structurally invalid")
+    return trees
+
+
+def _sgf_root_properties(tree: str) -> dict[str, list[str]]:
+    index = 1
+    while index < len(tree) and tree[index].isspace():
+        index += 1
+    if index >= len(tree) or tree[index] != ";":
+        raise MatchExecutionError("GNU saved SGF game tree lacks a root node")
+    index += 1
+    properties: dict[str, list[str]] = {}
+    while index < len(tree):
+        while index < len(tree) and tree[index].isspace():
+            index += 1
+        if index >= len(tree) or tree[index] in ";()":
+            break
+        name_start = index
+        while index < len(tree) and tree[index].isalpha() and tree[index].isupper():
+            index += 1
+        name = tree[name_start:index]
+        if not name or index >= len(tree) or tree[index] != "[":
+            raise MatchExecutionError("GNU saved SGF root property is malformed")
+        values: list[str] = []
+        while index < len(tree) and tree[index] == "[":
+            index += 1
+            characters: list[str] = []
+            while index < len(tree):
+                character = tree[index]
+                index += 1
+                if character == "\\":
+                    if index >= len(tree):
+                        raise MatchExecutionError("GNU saved SGF property escape is truncated")
+                    escaped = tree[index]
+                    index += 1
+                    if escaped in "\r\n":
+                        continue
+                    characters.append(escaped)
+                elif character == "]":
+                    break
+                else:
+                    characters.append(character)
+            else:
+                raise MatchExecutionError("GNU saved SGF property is truncated")
+            values.append("".join(characters))
+        if name in properties:
+            raise MatchExecutionError(f"GNU saved SGF duplicates root property {name}")
+        properties[name] = values
+    return properties
+
+
+def _one_sgf_property(properties: Mapping[str, list[str]], name: str) -> str:
+    values = properties.get(name)
+    if values is None or len(values) != 1:
+        raise MatchExecutionError(f"GNU saved SGF requires exactly one {name} property")
+    return values[0]
+
+
+def _parse_sgf_match(value: str, expected_engine_by_seat: Mapping[str, str]) -> list[dict[str, Any]]:
+    games: list[dict[str, Any]] = []
+    score = [0, 0]
+    expected_players = {
+        "PW": f"{expected_engine_by_seat['O']}_seat_O",
+        "PB": f"{expected_engine_by_seat['X']}_seat_X",
+    }
+    for index, tree in enumerate(_split_sgf_collection(value)):
+        properties = _sgf_root_properties(tree)
+        if (
+            _one_sgf_property(properties, "FF") != "4"
+            or _one_sgf_property(properties, "GM") != "6"
+            or _one_sgf_property(properties, "AP") != "GNU Backgammon:1.06.002"
+            or any(_one_sgf_property(properties, name) != player for name, player in expected_players.items())
+        ):
+            raise MatchExecutionError("GNU saved SGF has invalid format or player identities")
+        mi_values = properties.get("MI")
+        if not mi_values:
+            raise MatchExecutionError("GNU saved SGF lacks complete match information")
+        match_info: dict[str, int] = {}
+        for item in mi_values:
+            tag, separator, raw = item.partition(":")
+            if separator != ":" or tag.lower() in match_info or not raw.isdigit():
+                raise MatchExecutionError("GNU saved SGF match information is malformed")
+            match_info[tag.lower()] = int(raw)
+        if (
+            match_info != {"length": 7, "game": index, "ws": score[0], "bs": score[1]}
+            or max(score) >= 7
+        ):
+            raise MatchExecutionError("GNU saved SGF game order or score progression is invalid")
+        result_match = SGF_RESULT_RE.fullmatch(_one_sgf_property(properties, "RE"))
+        if result_match is None:
+            raise MatchExecutionError("GNU saved SGF game result is missing or malformed")
+        winner_seat = "O" if result_match.group(1).upper() == "W" else "X"
+        points = int(result_match.group(2))
+        if points <= 0:
+            raise MatchExecutionError("GNU saved SGF game result has invalid points")
+        start_score = list(score)
+        score[0 if winner_seat == "O" else 1] += points
+        games.append({
+            "game_number": index + 1,
+            "start_score": start_score,
+            "winner_physical_seat": winner_seat,
+            "winner_engine": expected_engine_by_seat[winner_seat],
+            "points": points,
+            "post_score": list(score),
+        })
+    if max(score) < 7:
+        raise MatchExecutionError("GNU saved SGF does not contain a complete seven-point match")
+    return games
+
+
+def _parse_text_match(value: str, expected_engine_by_seat: Mapping[str, str]) -> list[dict[str, Any]]:
+    match_headers = list(TEXT_MATCH_RE.finditer(value))
+    game_headers = list(TEXT_GAME_RE.finditer(value))
+    if (
+        len(value.strip()) < 24
+        or "\x00" in value
+        or len(match_headers) != 1
+        or int(re.search(r"\d+", match_headers[0].group(0)).group(0)) != 7
+        or not game_headers
+        or [int(header.group(1)) for header in game_headers] != list(range(1, len(game_headers) + 1))
+    ):
+        raise MatchExecutionError("GNU exported match text is empty or structurally invalid")
+    expected_players = sorted((engine, seat) for seat, engine in expected_engine_by_seat.items())
+    score = [0, 0]
+    games: list[dict[str, Any]] = []
+    accepted_identity_spans: list[tuple[int, int]] = []
+    for index, header in enumerate(game_headers):
+        block_end = game_headers[index + 1].start() if index + 1 < len(game_headers) else len(value)
+        block = value[header.end():block_end]
+        player_lines: list[tuple[int, str, list[re.Match[str]]]] = []
+        offset = header.end()
+        for line in block.splitlines(keepends=True):
+            matches = list(TEXT_PLAYER_SCORE_RE.finditer(line))
+            if matches:
+                player_lines.append((offset, line, matches))
+            offset += len(line)
+        if len(player_lines) != 1:
+            raise MatchExecutionError("GNU exported match text lacks one exact player/score line per game")
+        line_offset, _, player_matches = player_lines[0]
+        if sorted((match.group(1), match.group(2)) for match in player_matches) != expected_players:
+            raise MatchExecutionError("GNU exported match text has invalid per-game player identities")
+        if len(player_matches) != 2:
+            raise MatchExecutionError("GNU exported match text duplicates per-game player identities")
+        by_seat = {match.group(2): match for match in player_matches}
+        observed_score = [int(by_seat["O"].group(3)), int(by_seat["X"].group(3))]
+        if observed_score != score or max(score) >= 7:
+            raise MatchExecutionError("GNU exported match text score progression is invalid")
+        accepted_identity_spans.extend(
+            (line_offset + match.start(), line_offset + match.end()) for match in player_matches
+        )
+        result_matches = list(TEXT_RESULT_RE.finditer(block))
+        if len(result_matches) != 1:
+            raise MatchExecutionError("GNU exported match text lacks one exact result per game")
+        result = result_matches[0]
+        points = int(result.group(2))
+        if points <= 0:
+            raise MatchExecutionError("GNU exported match text has invalid result points")
+        result_column = len(result.group("indent").expandtabs())
+        player_columns = {seat: by_seat[seat].start() for seat in ("O", "X")}
+        distances = {seat: abs(column - result_column) for seat, column in player_columns.items()}
+        if (
+            distances["O"] == distances["X"]
+            or header.end() + result.start() <= line_offset
+        ):
+            raise MatchExecutionError("GNU exported match text result column or ordering is ambiguous")
+        winner_seat = min(distances, key=distances.get)
+        start_score = list(score)
+        score[0 if winner_seat == "O" else 1] += points
+        games.append({
+            "game_number": index + 1,
+            "start_score": start_score,
+            "winner_physical_seat": winner_seat,
+            "winner_engine": expected_engine_by_seat[winner_seat],
+            "points": points,
+            "post_score": list(score),
+        })
+    all_identity_spans = [(match.start(), match.end()) for match in TEXT_IDENTITY_RE.finditer(value)]
+    if len(all_identity_spans) != len(accepted_identity_spans) or any(
+        not any(start == accepted_start for accepted_start, _ in accepted_identity_spans)
+        for start, _ in all_identity_spans
+    ):
+        raise MatchExecutionError("GNU exported match text has player identities outside valid game blocks")
+    if max(score) < 7:
+        raise MatchExecutionError("GNU exported match text does not contain a complete seven-point match")
+    return games
+
+
+def _read_jsonl_evidence(path: Path, label: str) -> list[dict[str, Any]]:
+    try:
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MatchExecutionError(f"{label} is absent or malformed") from exc
+    if not records or any(not isinstance(record, dict) for record in records):
+        raise MatchExecutionError(f"{label} is absent or malformed")
+    return records
+
+
+def _validate_complete_native_evidence(
+    match_root: Path,
+    expected_engine_by_seat: Mapping[str, str],
+) -> dict[str, Any]:
+    """Reconcile the complete native match against every numbered journal."""
+    match_root = Path(match_root)
+    native = match_root / "native"
+    summary = _validate_native_outputs(
+        native / "match.sgf", native / "match.txt", expected_engine_by_seat
+    )
+    expected_numbers = list(range(1, summary["game_count"] + 1))
+    try:
+        manifest = json.loads((match_root / "match_manifest.json").read_text(encoding="utf-8"))
+        dice_manifest = json.loads((match_root / "dice/seat_dice_manifest.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MatchExecutionError("match or deterministic-dice manifest is absent or malformed") from exc
+    if (
+        manifest.get("engine_by_physical_seat") != dict(expected_engine_by_seat)
+        or manifest.get("native_evidence") != summary
+        or manifest.get("native_outputs") != ["native/match.sgf", "native/match.txt"]
+        or manifest.get("candidate_actual_depth_evidence") != "decisions.jsonl"
+        or manifest.get("dice_manifest") != "dice/seat_dice_manifest.json"
+        or manifest.get("dice_consumption") != "dice/seat_dice_consumption.jsonl"
+    ):
+        raise MatchExecutionError("match manifest does not reconcile with complete native evidence")
+
+    decisions = _read_jsonl_evidence(match_root / "decisions.jsonl", "decision journal")
+    for record in decisions:
+        seat = record.get("physical_seat")
+        if (
+            type(record.get("game_number")) is not int
+            or seat not in {"O", "X"}
+            or record.get("engine") != expected_engine_by_seat[seat]
+        ):
+            raise MatchExecutionError("decision journal has invalid game/seat/engine evidence")
+    decision_numbers = sorted({record["game_number"] for record in decisions})
+    if decision_numbers != expected_numbers:
+        raise MatchExecutionError("decision journal game numbering does not match native games")
+    for game in summary["games"]:
+        terminals = []
+        for record in decisions:
+            transition = record.get("transition_evidence")
+            if record.get("game_number") == game["game_number"] and isinstance(transition, dict):
+                event = transition.get("terminal_event")
+                if event is not None:
+                    if not isinstance(event, dict):
+                        raise MatchExecutionError("decision terminal evidence is malformed")
+                    terminals.append((transition, event))
+        if len(terminals) != 1:
+            raise MatchExecutionError("decision journal lacks one exact terminal event per native game")
+        transition, event = terminals[0]
+        if (
+            transition.get("game_number") != game["game_number"]
+            or event.get("winner_physical_seat") != game["winner_physical_seat"]
+            or event.get("winner_engine") != game["winner_engine"]
+            or event.get("points") != game["points"]
+            or not isinstance(transition.get("post_command"), dict)
+            or transition["post_command"].get("score") != game["post_score"]
+        ):
+            raise MatchExecutionError("decision terminal evidence conflicts with native game result")
+
+    consumption_path = match_root / "dice/seat_dice_consumption.jsonl"
+    consumption = _read_jsonl_evidence(consumption_path, "deterministic dice consumption journal")
+    for record in consumption:
+        seat = record.get("physical_seat")
+        if (
+            type(record.get("game_number")) is not int
+            or seat not in {"O", "X"}
+            or record.get("engine") != expected_engine_by_seat[seat]
+        ):
+            raise MatchExecutionError("deterministic dice journal has invalid game/seat/engine evidence")
+    dice_numbers = sorted({record["game_number"] for record in consumption})
+    if dice_numbers != expected_numbers:
+        raise MatchExecutionError("deterministic dice journal game numbering does not match native games")
+    for game_number in expected_numbers:
+        openings = [
+            record for record in consumption
+            if record.get("game_number") == game_number and record.get("prompt_type") == "opening"
+        ]
+        if {record.get("physical_seat") for record in openings} != {"O", "X"}:
+            raise MatchExecutionError("deterministic dice journal lacks both opening-seat streams per game")
+    consumption_authority = dice_manifest.get("consumption")
+    streams = dice_manifest.get("streams")
+    if (
+        dice_manifest.get("engine_by_physical_seat") != dict(expected_engine_by_seat)
+        or not isinstance(consumption_authority, dict)
+        or consumption_authority.get("path") != consumption_path.name
+        or consumption_authority.get("entries") != len(consumption)
+        or consumption_authority.get("sha256") != sha256_file(consumption_path)
+        or not isinstance(streams, list)
+    ):
+        raise MatchExecutionError("deterministic dice manifest does not reconcile with consumption evidence")
+    if any(
+        sum(
+            isinstance(stream, dict)
+            and stream.get("game_number") == game_number
+            and stream.get("physical_seat") == seat
+            and stream.get("engine") == expected_engine_by_seat[seat]
+            for stream in streams
+        ) != 1
+        for game_number in expected_numbers for seat in ("O", "X")
+    ):
+        raise MatchExecutionError("deterministic dice manifest lacks native-game seat streams")
+    return summary
 
 
 def _validate_opening_transition(
@@ -1234,6 +1527,7 @@ class PairExecutor:
         primary_error: BaseException | None = None
         dice_manifest: Path | None = None
         consumption: Path | None = None
+        native_evidence: dict[str, Any] | None = None
         try:
             board = GnuBoardProcess(
                 self.engine_kit.gnu_runtime.executable,
@@ -1406,7 +1700,9 @@ class PairExecutor:
             native.mkdir()
             board.send(f"save match {native / 'match.sgf'}")
             board.send(f"export match text {native / 'match.txt'}")
-            _validate_native_outputs(native / "match.sgf", native / "match.txt", engine_by_seat)
+            native_evidence = _validate_native_outputs(
+                native / "match.sgf", native / "match.txt", engine_by_seat
+            )
             write_json(native / "board_transcript.json", board.transcript)
             completed = True
         except BaseException as exc:
@@ -1442,7 +1738,7 @@ class PairExecutor:
                     raise cleanup_errors[0]
         if completed:
             (match_root / "board_transcript.partial.json").unlink(missing_ok=True)
-        if dice_manifest is None or consumption is None:
+        if dice_manifest is None or consumption is None or native_evidence is None:
             raise MatchExecutionError("match dice evidence was not persisted")
         required = (match_root / "native" / "match.sgf", match_root / "native" / "match.txt", decision_path)
         if not all(path.is_file() for path in required):
@@ -1458,10 +1754,12 @@ class PairExecutor:
             "analysis_request_evidence": request_path.name,
             "analysis_result_evidence": result_path.name,
             "native_outputs": [str(path.relative_to(match_root)) for path in required[:2]],
+            "native_evidence": native_evidence,
             "output_sha256": {
                 str(path.relative_to(match_root)): sha256_file(path)
                 for path in (*required, dice_manifest, consumption, request_path, result_path)
             },
         }
         write_json(match_root / "match_manifest.json", manifest)
+        _validate_complete_native_evidence(match_root, engine_by_seat)
         return manifest

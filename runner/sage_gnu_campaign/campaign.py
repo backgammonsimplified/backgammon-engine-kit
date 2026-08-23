@@ -27,7 +27,7 @@ from .manifests import (
     write_bytes_atomic,
     write_json,
 )
-from .match import PairExecutor, _validate_native_outputs
+from .match import PairExecutor, _validate_complete_native_evidence
 from .preflight import preflight
 
 
@@ -140,21 +140,34 @@ def publish_pair(
     shutil.copytree(execution_root, staging)
     fsync_tree(staging)
     fsync_directory(pairs)
+    match_manifests: dict[str, dict[str, Any]] = {}
     for side in ("A", "B"):
         native = staging / "matches" / side / "native"
+        match = native.parent
         mapping = config.data["match"]["members"][side]
         expected_engine_by_seat = {
             mapping["sage_physical_seat"]: "sage",
             mapping["gnu_physical_seat"]: "gnu",
         }
-        _validate_native_outputs(
-            native / "match.sgf",
-            native / "match.txt",
+        _validate_complete_native_evidence(
+            match,
             expected_engine_by_seat,
+        )
+        match_manifests[side] = json.loads(
+            (match / "match_manifest.json").read_text(encoding="utf-8")
         )
     execution_result = json.loads((staging / "execution_result.json").read_text(encoding="utf-8"))
     if execution_result.get("status") != "complete" or execution_result.get("pair_identity") != identity.to_dict():
         raise CampaignError("pair executor result does not match planned identity")
+    execution_matches = execution_result.get("matches")
+    if (
+        not isinstance(execution_matches, list)
+        or len(execution_matches) != 2
+        or {match.get("side") for match in execution_matches if isinstance(match, dict)} != {"A", "B"}
+        or any(next(match for match in execution_matches if match.get("side") == side) != match_manifests[side]
+               for side in ("A", "B"))
+    ):
+        raise CampaignError("pair executor match manifests conflict with complete native evidence")
     output_hashes = checksum_entries(staging)
     finalized_at = utc_now()
     pair_manifest = {

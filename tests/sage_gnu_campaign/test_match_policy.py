@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
 from pathlib import Path
@@ -137,8 +138,9 @@ def test_pre_roll_cube_and_checker_policy_is_explicit() -> None:
 
 
 class FakeDice:
-    def __init__(self, root: Path, **_: object):
+    def __init__(self, root: Path, **values: object):
         self.root = root
+        self.engine_by_seat = values.get("engine_by_seat", {"O": "sage", "X": "gnu"})
         self.seed = "fake-seed"
         self.current_game_number = 1
         self.expected_next_roll_seat = None
@@ -154,9 +156,27 @@ class FakeDice:
 
     def write_evidence(self) -> tuple[Path, Path]:
         manifest = self.root / "seat_dice_manifest.json"
-        consumption = self.root / "seat_dice_consumption.json"
-        write_json(manifest, {"status": "fake"})
-        write_json(consumption, {"status": "fake"})
+        consumption = self.root / "seat_dice_consumption.jsonl"
+        consumption.write_text(
+            "".join(json.dumps(record, sort_keys=True) + "\n" for record in self.consumption),
+            encoding="utf-8",
+        )
+        write_json(manifest, {
+            "engine_by_physical_seat": self.engine_by_seat,
+            "streams": [
+                {
+                    "game_number": game,
+                    "physical_seat": seat,
+                    "engine": self.engine_by_seat[seat],
+                }
+                for game in (1, 2) for seat in ("O", "X")
+            ],
+            "consumption": {
+                "path": consumption.name,
+                "entries": len(self.consumption),
+                "sha256": hashlib.sha256(consumption.read_bytes()).hexdigest(),
+            },
+        })
         return manifest, consumption
 
 
@@ -213,10 +233,21 @@ class FakeBoard:
             return f"Position ID: P{self.board_index}\nMatch ID: M{self.board_index}\n"
         if command.startswith("save match "):
             path = Path(command.removeprefix("save match "))
-            path.write_text("(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7][game:0])\n", encoding="utf-8")
+            path.write_text(
+                "(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]"
+                "MI[length:7][game:0][ws:0][bs:0]PW[sage_seat_O]PB[gnu_seat_X]RE[W+6])\n"
+                "(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]"
+                "MI[length:7][game:1][ws:6][bs:0]PW[sage_seat_O]PB[gnu_seat_X]RE[W+2])\n",
+                encoding="utf-8",
+            )
         if command.startswith("export match text "):
             path = Path(command.removeprefix("export match text "))
-            path.write_text("7 point match\n\n Game 1\n sage_seat_O : 0  gnu_seat_X : 0\n", encoding="utf-8")
+            path.write_text(
+                "7 point match\n\n Game 1\n sage_seat_O : 0             gnu_seat_X : 0\n"
+                "      Wins 6 points\n\n Game 2\n sage_seat_O : 6             gnu_seat_X : 0\n"
+                "      Wins 2 points\n",
+                encoding="utf-8",
+            )
         if command == "pass":
             return (
                 "gnu_seat_X refuses the cube and gives up 2 points.\n"
@@ -1109,104 +1140,84 @@ def test_opening_transition_rejects_wrong_but_changed_hidden_state(case: str) ->
         )
 
 
+def native_pair(
+    engine_by_seat: dict[str, str], games: list[tuple[str, int]],
+) -> tuple[str, str]:
+    score = [0, 0]
+    sgf: list[str] = []
+    text = ["7 point match\n"]
+    for index, (winner, points) in enumerate(games):
+        o_name = f"{engine_by_seat['O']}_seat_O"
+        x_name = f"{engine_by_seat['X']}_seat_X"
+        result = "W" if winner == "O" else "B"
+        sgf.append(
+            "(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]"
+            f"MI[length:7][game:{index}][ws:{score[0]}][bs:{score[1]}]"
+            f"PW[{o_name}]PB[{x_name}]RE[{result}+{points}])\n"
+        )
+        text.append(
+            f"\n Game {index + 1}\n {o_name} : {score[0]}             {x_name} : {score[1]}\n"
+            f"{'      ' if winner == 'O' else '                                    '}Wins {points} points\n"
+        )
+        score[0 if winner == "O" else 1] += points
+    return "".join(sgf), "".join(text)
+
+
 @pytest.mark.parametrize(
-    "sgf,text,error",
+    "engine_by_seat,games",
     [
-        ("", "7 point match\nGame 1\nplayers\n", "SGF"),
-        ("(;FF[4]GM[6]", "7 point match\nGame 1\nplayers\n", "SGF"),
-        ("(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7])junk)", "7 point match\nGame 1\nplayers\n", "SGF"),
-        ("(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7])\n", "", "match text"),
-        ("(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7])\n", "7 point match\nGame 1\nplayers\n", "match text"),
+        ({"O": "sage", "X": "gnu"}, [("O", 8)]),
+        ({"O": "gnu", "X": "sage"}, [("X", 8)]),
+        ({"O": "sage", "X": "gnu"}, [("O", 2), ("X", 1), ("O", 6)]),
+        ({"O": "gnu", "X": "sage"}, [("X", 2), ("O", 1), ("X", 6)]),
     ],
+    ids=["one-game-side-a", "one-game-side-b", "multi-game-side-a", "multi-game-side-b"],
 )
-def test_fake_board_native_outputs_reject_empty_or_truncated_files(
-    tmp_path: Path, sgf: str, text: str, error: str
+def test_native_outputs_accept_complete_real_shaped_game_collections(
+    tmp_path: Path, engine_by_seat: dict[str, str], games: list[tuple[str, int]],
 ) -> None:
+    sgf, text = native_pair(engine_by_seat, games)
     sgf_path = tmp_path / "match.sgf"
     text_path = tmp_path / "match.txt"
     sgf_path.write_text(sgf, encoding="utf-8")
     text_path.write_text(text, encoding="utf-8")
-    with pytest.raises(MatchExecutionError, match=error):
-        _validate_native_outputs(sgf_path, text_path, {"O": "sage", "X": "gnu"})
+    summary = _validate_native_outputs(sgf_path, text_path, engine_by_seat)
+    assert summary["game_count"] == len(games)
+    assert summary["final_score"] == summary["games"][-1]["post_score"]
 
 
-@pytest.mark.parametrize(
-    "engine_by_seat,text",
-    [
-        ({"O": "sage", "X": "gnu"}, "7 point match\n\n Game 1\n sage_seat_O : 0  gnu_seat_X : 0\n"),
-        ({"O": "gnu", "X": "sage"}, "7 point match\n\n Game 1\n sage_seat_X : 0  gnu_seat_O : 0\n"),
-        (
-            {"O": "sage", "X": "gnu"},
-            "7 point match\n\n Game 1\n sage_seat_O : 0  gnu_seat_X : 0\n"
-            "moves\n Game 2\n sage_seat_O : 1  gnu_seat_X : 0\n",
-        ),
-        (
-            {"O": "gnu", "X": "sage"},
-            "7 point match\n\n Game 1\n sage_seat_X : 0  gnu_seat_O : 0\n"
-            "moves\n Game 2\n sage_seat_X : 0  gnu_seat_O : 2\n"
-            "moves\n Game 3\n sage_seat_X : 2  gnu_seat_O : 2\n",
-        ),
-    ],
-    ids=["one-game-side-a", "one-game-side-b", "multi-game-side-a", "multi-game-side-b"],
-)
-def test_fake_board_native_outputs_accept_exact_side_player_mappings(
-    tmp_path: Path, engine_by_seat: dict[str, str], text: str
+@pytest.mark.parametrize("bad_sgf", ["", "(;FF[4]GM[6]", "junk(;FF[4]GM[6])"])
+def test_native_outputs_reject_empty_truncated_or_outside_sgf(
+    tmp_path: Path, bad_sgf: str,
 ) -> None:
+    _, text = native_pair({"O": "sage", "X": "gnu"}, [("O", 8)])
     sgf_path = tmp_path / "match.sgf"
     text_path = tmp_path / "match.txt"
-    sgf_path.write_text("(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7][game:0])\n", encoding="utf-8")
+    sgf_path.write_text(bad_sgf, encoding="utf-8")
     text_path.write_text(text, encoding="utf-8")
-    _validate_native_outputs(sgf_path, text_path, engine_by_seat)
-
-
-@pytest.mark.parametrize(
-    "players",
-    [
-        "sage_seat_O : 0",
-        "sage_seat_O : 0  sage_seat_O : 0  gnu_seat_X : 0",
-        "sage_seat_O : 0  gnu_seat_X : 0  sage_seat_X : 0",
-        "sage_seat_O : 0  gnu_seat_O : 0",
-        "sage_seat_X : 0  gnu_seat_O : 0",
-    ],
-    ids=["missing", "duplicate", "extra", "cross-wired", "wrong-side"],
-)
-def test_fake_board_native_outputs_reject_nonexact_side_player_mappings(
-    tmp_path: Path, players: str
-) -> None:
-    sgf_path = tmp_path / "match.sgf"
-    text_path = tmp_path / "match.txt"
-    sgf_path.write_text("(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7][game:0])\n", encoding="utf-8")
-    text_path.write_text(f"7 point match\n\n Game 1\n {players}\n", encoding="utf-8")
-    with pytest.raises(MatchExecutionError, match="match text"):
+    with pytest.raises(MatchExecutionError, match="SGF"):
         _validate_native_outputs(sgf_path, text_path, {"O": "sage", "X": "gnu"})
 
 
 @pytest.mark.parametrize(
-    "text",
+    "mutation",
     [
-        "7 point match\nGame 1\nsage_seat_O : 0  gnu_seat_X : 0\nGame 2\nsage_seat_O : 1\n",
-        "7 point match\nGame 1\nsage_seat_O : 0  gnu_seat_X : 0\nGame 2\nsage_seat_X : 1  gnu_seat_O : 0\n",
-        "7 point match\nGame 1\nsage_seat_O : 0  gnu_seat_X : 0  other_seat_O : 0\n",
-        "7 point match\nGame 1\nsage_seat_O : 0  sage_seat_O : 0  gnu_seat_X : 0\n",
-        "7 point match\nGame 1\nsage_seat_O : 0  gnu_seat_X : 0\nGame 3\nsage_seat_O : 1  gnu_seat_X : 0\n",
+        lambda text: text.replace("gnu_seat_X : 0", "", 1),
+        lambda text: text.replace("gnu_seat_X", "gnu_seat_O", 1),
+        lambda text: "sage_seat_O : 0\n" + text,
+        lambda text: text + "\ngnu_seat_X : 0\n",
+        lambda text: text.replace("Game 2", "Game 3", 1),
     ],
-    ids=[
-        "later-game-missing-player",
-        "later-game-cross-wired",
-        "unexpected-third-player",
-        "duplicate-player-in-game",
-        "malformed-game-sequence",
-    ],
+    ids=["missing-player", "cross-wired", "preamble-identity", "trailer-identity", "ordering-gap"],
 )
-def test_fake_board_native_outputs_reject_invalid_per_game_player_sets(
-    tmp_path: Path, text: str
+def test_native_outputs_reject_invalid_text_game_structure(
+    tmp_path: Path, mutation,
 ) -> None:
+    mapping = {"O": "sage", "X": "gnu"}
+    sgf, text = native_pair(mapping, [("O", 2), ("X", 1), ("O", 6)])
     sgf_path = tmp_path / "match.sgf"
     text_path = tmp_path / "match.txt"
-    sgf_path.write_text(
-        "(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]MI[length:7][game:0])\n",
-        encoding="utf-8",
-    )
-    text_path.write_text(text, encoding="utf-8")
+    sgf_path.write_text(sgf, encoding="utf-8")
+    text_path.write_text(mutation(text), encoding="utf-8")
     with pytest.raises(MatchExecutionError, match="match text"):
-        _validate_native_outputs(sgf_path, text_path, {"O": "sage", "X": "gnu"})
+        _validate_native_outputs(sgf_path, text_path, mapping)

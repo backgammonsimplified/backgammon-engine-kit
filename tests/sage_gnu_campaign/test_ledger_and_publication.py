@@ -36,6 +36,7 @@ ENGINE_KIT_COMMIT = "833929ea72ccec058527f3cd1fa0b54a07ac666b"
 
 def _rewrite_match_id(
     gnuid: str, *, score_delta: tuple[int, int] = (0, 0), match_length: int | None = None,
+    game_state_code: int | None = None,
 ) -> str:
     position_id, match_id = gnuid.split(":")
     data = bytearray(base64.b64decode(match_id + "=" * (-len(match_id) % 4)))
@@ -55,6 +56,8 @@ def _rewrite_match_id(
     set_bits(21, 15, match_length if match_length is not None else get_bits(21, 15))
     set_bits(36, 15, get_bits(36, 15) + score_delta[0])
     set_bits(51, 15, get_bits(51, 15) + score_delta[1])
+    if game_state_code is not None:
+        set_bits(8, 3, game_state_code)
     encoded = base64.b64encode(bytes(data)).decode("ascii").rstrip("=")
     return f"{position_id}:{encoded}"
 
@@ -544,6 +547,59 @@ def test_publication_reconciles_absolute_gnuid_scores_and_match_length(
     artifact_root.mkdir()
 
     with pytest.raises(MatchExecutionError, match="score|match length|initial state"):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
+
+
+@pytest.mark.parametrize(
+    ("terminal_kind", "substitute_code"),
+    [
+        ("ordinary_game_over", 4),
+        ("drop", 2),
+        ("resignation", 4),
+        ("resignation", 2),
+    ],
+)
+def test_publication_rejects_wrong_exact_gnu_terminal_state_code(
+    tmp_path: Path, terminal_kind: str, substitute_code: int,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    if terminal_kind == "drop":
+        write_execution_fixture(
+            execution, identity, games=[("O", 1)] * 7, terminal_kinds=["drop"] * 7
+        )
+    elif terminal_kind == "resignation":
+        write_execution_fixture(
+            execution, identity, games=[("O", 2), ("O", 6)],
+            terminal_kinds=["resignation", "resignation"],
+        )
+    else:
+        write_execution_fixture(execution, identity)
+    match = execution / "matches/A"
+    decision_path = match / "decisions.jsonl"
+    decisions = [json.loads(line) for line in decision_path.read_text().splitlines()]
+    terminal = decisions[-1]["transition_evidence"]
+    terminal["post_command"]["gnuid"] = _rewrite_match_id(
+        terminal["post_command"]["gnuid"], game_state_code=substitute_code
+    )
+    decision_path.write_text(
+        "".join(json.dumps(item, sort_keys=True) + "\n" for item in decisions),
+        encoding="utf-8",
+    )
+    manifest_path = match / "match_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["output_sha256"]["decisions.jsonl"] = hashlib.sha256(
+        decision_path.read_bytes()
+    ).hexdigest()
+    write_json(manifest_path, manifest)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+
+    with pytest.raises(MatchExecutionError, match="terminal|completion|turn/action state"):
         publish_pair(
             execution, artifact_root, config, identity, publication_common(),
             {"attempt_count": 1, "transitions": []},

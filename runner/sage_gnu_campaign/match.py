@@ -178,9 +178,13 @@ def _decode_publication_gnuid(value: str) -> Any:
         raise MatchExecutionError("publication Match ID has invalid dice")
     if doubled and resignation:
         raise MatchExecutionError("publication Match ID has conflicting pending actions")
-    game_state = {0: "setup", 1: "playing", 2: "game_over", 3: "resigned", 4: "game_over"}.get(
-        game_state_code
-    )
+    game_state = {
+        0: "setup",
+        1: "playing",
+        2: "game_over_normal",
+        3: "resigned",
+        4: "dropped",
+    }.get(game_state_code)
     if game_state is None:
         raise MatchExecutionError("publication Match ID has an unsupported game state")
 
@@ -2528,7 +2532,11 @@ def _validate_command_transition(
         if match_complete:
             if consumed:
                 raise MatchExecutionError("GNU consumed opening dice after the match was complete")
-            expected_terminal_state = "resigned" if command == "accept" else "game_over"
+            expected_terminal_state = (
+                "resigned" if command == "accept"
+                else "dropped" if command == "pass"
+                else "game_over_normal"
+            )
             if (
                 next_state.game_state != expected_terminal_state
                 or next_state.decision_player is not None

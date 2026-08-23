@@ -364,7 +364,10 @@ def _encode_fixture_gnuid(state: dict[str, Any]) -> str:
     _set_bits(bits, 4, 2, {"O": 0, "X": 1, "center": 3}[state["cube_owner"]])
     _set_bits(bits, 6, 1, 0 if on_roll == "O" else 1)
     _set_bits(bits, 7, 1, 0)
-    _set_bits(bits, 8, 3, {"setup": 0, "playing": 1, "game_over": 2, "resigned": 3}[state["game_state"]])
+    _set_bits(bits, 8, 3, {
+        "setup": 0, "playing": 1, "game_over_normal": 2,
+        "resigned": 3, "dropped": 4,
+    }[state["game_state"]])
     decision = state["decision"] or on_roll
     _set_bits(bits, 11, 1, 0 if decision == "O" else 1)
     pending = state["pending"]
@@ -642,7 +645,10 @@ def write_complete_match(
                         "dice": list(current["dice"]),
                     }
                 else:
-                    current["game_state"] = "game_over"
+                    current["game_state"] = (
+                        "dropped" if game["terminal"]["kind"] == "drop"
+                        else "game_over_normal"
+                    )
                     current["decision"] = None
                     current["dice"] = None
                     current["pending"] = {"type": "none"}

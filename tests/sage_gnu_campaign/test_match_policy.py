@@ -484,7 +484,7 @@ class FakeEngineKit:
                 position(
                     8, None, "none", None, board=x_moved_again,
                     on_roll="player_0", cube_value=2, cube_owner="player_0",
-                    game_state="game_over",
+                    game_state="dropped",
                 ),
         ]
         self.positions = iter(self.position_values)
@@ -724,7 +724,7 @@ def test_resignation_accept_requires_exact_score_cube_action_and_turn_state() ->
 
     mislabeled = position(
         8, None, "none", None,
-        on_roll="player_1", cube_value=2, game_state="game_over",
+        on_roll="player_1", cube_value=2, game_state="game_over_normal",
     )
     with pytest.raises(MatchExecutionError, match="invalid turn/action state"):
         _validate_command_transition(
@@ -869,14 +869,14 @@ def test_take_transition_requires_exact_cube_and_cleared_action(case: str) -> No
         )
 
 
-def test_pass_requires_game_over_not_resigned() -> None:
+def test_pass_requires_dropped_not_other_terminal_state() -> None:
     mapping = {"O": "sage", "X": "gnu"}
     before = position(
         6, "player_1", "double", None,
         on_roll="player_0", offerer="player_0", responder="player_1",
         offered_cube_value=2,
     )
-    valid = position(7, None, "none", None, on_roll="player_0", game_state="game_over")
+    valid = position(7, None, "none", None, on_roll="player_0", game_state="dropped")
     _validate_command_transition(
         "pass", before, valid, [], 1, "X", "gnu", mapping, "O",
         terminal_event("drop", "O", 1, loser_seat="X"),
@@ -896,7 +896,7 @@ def test_normal_bearoff_requires_game_over_not_resigned() -> None:
     before = position(6, "player_0", "none", (1, 1), board=before_board)
     valid = position(
         7, None, "none", None, board=final_board,
-        on_roll="player_0", game_state="game_over",
+        on_roll="player_0", game_state="game_over_normal",
     )
     _validate_command_transition(
         "1/off", before, valid, [], 1, "O", "sage", mapping, "X",
@@ -1279,7 +1279,9 @@ def test_opening_transition_rejects_wrong_but_changed_hidden_state(case: str) ->
     ]
     observed = position(1, "player_1", "none", (4, 1))
     if case in {"resigned-opening", "invalid-playing-state"}:
-        observed.state.game_state = "resigned" if case == "resigned-opening" else "game_over"
+        observed.state.game_state = (
+            "resigned" if case == "resigned-opening" else "game_over_normal"
+        )
     elif case in {"wrong-decision-player", "loser-decision-player"}:
         observed.state.decision_player = "player_0"
     elif case == "wrong-score":

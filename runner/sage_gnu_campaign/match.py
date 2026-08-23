@@ -62,7 +62,21 @@ TEXT_ACTION_RE = re.compile(
     r"|(?P<take>Takes)\b|(?P<drop>Drops)\b"
 )
 SGF_RESULT_RE = re.compile(r"^([WB])\+(\d+)(R(?:esign)?)?$", re.IGNORECASE)
+GNU_RUNTIME_VERSION_RE = re.compile(r"^(\d+\.\d+\.\d+) (\d{8})$")
 NO_RETURNED_RESULT = object()
+
+
+def _frozen_gnu_sgf_application(config: CampaignConfig) -> str:
+    """Derive GNU's SGF AP identity from the verified frozen runtime identity."""
+    runtime_version = config.data.get("engines", {}).get("gnu", {}).get(
+        "runtime_identity", {}
+    ).get("engine_version")
+    if not isinstance(runtime_version, str):
+        raise MatchExecutionError("frozen GNU runtime version identity is missing or malformed")
+    match = GNU_RUNTIME_VERSION_RE.fullmatch(runtime_version)
+    if match is None:
+        raise MatchExecutionError("frozen GNU runtime version identity is missing or malformed")
+    return f"GNU Backgammon:{match.group(1)}"
 
 
 def _parse_terminal_event(output: str) -> dict[str, Any] | None:
@@ -171,6 +185,7 @@ def _validate_native_outputs(
     sgf_path: Path,
     text_path: Path,
     expected_engine_by_seat: Mapping[str, str],
+    expected_sgf_application: str,
 ) -> dict[str, Any]:
     try:
         sgf = sgf_path.read_text(encoding="utf-8-sig")
@@ -182,7 +197,9 @@ def _validate_native_outputs(
         or set(expected_engine_by_seat.values()) != {"sage", "gnu"}
     ):
         raise MatchExecutionError("GNU native player authority is invalid")
-    sgf_games = _parse_sgf_match(sgf.strip(), expected_engine_by_seat)
+    sgf_games = _parse_sgf_match(
+        sgf.strip(), expected_engine_by_seat, expected_sgf_application
+    )
     text_games = _parse_text_match(exported, expected_engine_by_seat)
     if len(sgf_games) != len(text_games):
         raise MatchExecutionError("GNU SGF/text game collections or results do not match")
@@ -467,7 +484,11 @@ def _validate_action_structure(
     return enriched, result_level
 
 
-def _parse_sgf_match(value: str, expected_engine_by_seat: Mapping[str, str]) -> list[dict[str, Any]]:
+def _parse_sgf_match(
+    value: str,
+    expected_engine_by_seat: Mapping[str, str],
+    expected_sgf_application: str,
+) -> list[dict[str, Any]]:
     games: list[dict[str, Any]] = []
     score = [0, 0]
     expected_players = {
@@ -480,7 +501,7 @@ def _parse_sgf_match(value: str, expected_engine_by_seat: Mapping[str, str]) -> 
         if (
             _one_sgf_property(properties, "FF") != "4"
             or _one_sgf_property(properties, "GM") != "6"
-            or _one_sgf_property(properties, "AP") != "GNU Backgammon:1.06.002"
+            or _one_sgf_property(properties, "AP") != expected_sgf_application
             or any(_one_sgf_property(properties, name) != player for name, player in expected_players.items())
         ):
             raise MatchExecutionError("GNU saved SGF has invalid format or player identities")
@@ -690,6 +711,7 @@ def _read_jsonl_evidence(path: Path, label: str) -> list[dict[str, Any]]:
 def _validate_complete_native_evidence(
     match_root: Path,
     expected_engine_by_seat: Mapping[str, str],
+    expected_sgf_application: str,
     *,
     identity: PairIdentity | None = None,
     match_side: str | None = None,
@@ -700,7 +722,8 @@ def _validate_complete_native_evidence(
     match_root = Path(match_root)
     native = match_root / "native"
     summary = _validate_native_outputs(
-        native / "match.sgf", native / "match.txt", expected_engine_by_seat
+        native / "match.sgf", native / "match.txt", expected_engine_by_seat,
+        expected_sgf_application,
     )
     expected_numbers = list(range(1, summary["game_count"] + 1))
     try:
@@ -2368,7 +2391,8 @@ class PairExecutor:
             board.send(f"save match {native / 'match.sgf'}")
             board.send(f"export match text {native / 'match.txt'}")
             native_evidence = _validate_native_outputs(
-                native / "match.sgf", native / "match.txt", engine_by_seat
+                native / "match.sgf", native / "match.txt", engine_by_seat,
+                _frozen_gnu_sgf_application(self.config),
             )
             write_json(native / "board_transcript.json", board.transcript)
             completed = True
@@ -2428,5 +2452,7 @@ class PairExecutor:
             },
         }
         write_json(match_root / "match_manifest.json", manifest)
-        _validate_complete_native_evidence(match_root, engine_by_seat)
+        _validate_complete_native_evidence(
+            match_root, engine_by_seat, _frozen_gnu_sgf_application(self.config)
+        )
         return manifest

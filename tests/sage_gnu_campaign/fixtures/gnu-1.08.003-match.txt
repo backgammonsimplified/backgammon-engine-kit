@@ -1,0 +1,10 @@
+7 point match
+
+ Game 1
+ sage_seat_O : 0             gnu_seat_X : 0
+  1) 31: 8/5 6/5                 42: 13/9 6/4
+  2) Doubles => 2                Takes
+  3) 52: 13/8 8/6                Doubles => 4
+  4) Takes                       21: 9/7 7/6
+  5) 65: 6/off 5/off
+      Wins 8 points

@@ -5,8 +5,16 @@ import json
 from pathlib import Path
 from typing import Any
 
+from runner.sage_gnu_campaign.config import load_campaign_config
 from runner.sage_gnu_campaign.dice import dice_record, namespace_seed, stream_id, stream_sha256
 from runner.sage_gnu_campaign.manifests import write_json
+
+
+REPO = Path(__file__).resolve().parents[2]
+FROZEN_CONFIG = load_campaign_config(REPO / "experiments/sage-gnu-campaign-v1/campaign.json")
+FROZEN_GNU_SGF_APPLICATION = "GNU Backgammon:" + FROZEN_CONFIG.data["engines"]["gnu"][
+    "runtime_identity"
+]["engine_version"].split()[0]
 
 
 def _sgf_point(point: str, seat: str) -> str:
@@ -152,7 +160,7 @@ def native_documents(
             winner, points, seed=seed, game_number=index + 1, terminal_kind=terminal_kind,
         )
         sgf.append(
-            "(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]"
+            f"(;FF[4]GM[6]AP[{FROZEN_GNU_SGF_APPLICATION}]"
             f"MI[length:7][game:{index}][ws:{score[0]}][bs:{score[1]}]"
             f"PW[{o_name}]PB[{x_name}]RE[{'W' if winner == 'O' else 'B'}+{points}"
             f"{'R' if terminal_kind == 'resignation' else ''}]"
@@ -172,7 +180,9 @@ def native_documents(
     # native evidence that publication will revalidate.
     from runner.sage_gnu_campaign.match import _parse_sgf_match
 
-    parsed = _parse_sgf_match(sgf_document.strip(), engine_by_seat)
+    parsed = _parse_sgf_match(
+        sgf_document.strip(), engine_by_seat, FROZEN_GNU_SGF_APPLICATION
+    )
     summary = {"game_count": len(parsed), "games": parsed, "final_score": parsed[-1]["post_score"]}
     return sgf_document, text_document, summary
 

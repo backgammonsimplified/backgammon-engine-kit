@@ -17,6 +17,7 @@ from runner.sage_gnu_campaign.match import (
     MatchExecutionError,
     PairExecutor,
     _board_environment,
+    _frozen_gnu_sgf_application,
     _parse_terminal_event,
     _raise_on_gnu_error,
     _validate_command_transition,
@@ -26,11 +27,15 @@ from runner.sage_gnu_campaign.match import (
     pending_double_response,
     pre_roll_cube_action,
 )
-from tests.sage_gnu_campaign.native_fixtures import native_documents
+from tests.sage_gnu_campaign.native_fixtures import (
+    FROZEN_GNU_SGF_APPLICATION,
+    native_documents,
+)
 
 
 REPO = Path(__file__).resolve().parents[2]
 CONFIG = REPO / "experiments/sage-gnu-campaign-v1/campaign.json"
+NATIVE_FIXTURES = Path(__file__).with_name("fixtures")
 
 
 def test_board_environment_overrides_engine_kit_dev_null_home(tmp_path: Path) -> None:
@@ -1226,9 +1231,52 @@ def test_native_outputs_accept_complete_real_shaped_game_collections(
     text_path = tmp_path / "match.txt"
     sgf_path.write_text(sgf, encoding="utf-8")
     text_path.write_text(text, encoding="utf-8")
-    summary = _validate_native_outputs(sgf_path, text_path, engine_by_seat)
+    summary = _validate_native_outputs(
+        sgf_path, text_path, engine_by_seat, FROZEN_GNU_SGF_APPLICATION
+    )
     assert summary["game_count"] == len(games)
     assert summary["final_score"] == summary["games"][-1]["post_score"]
+
+
+def test_native_outputs_accept_golden_frozen_gnu_108003_sgf(tmp_path: Path) -> None:
+    config = load_campaign_config(CONFIG)
+    assert _frozen_gnu_sgf_application(config) == "GNU Backgammon:1.08.003"
+    summary = _validate_native_outputs(
+        NATIVE_FIXTURES / "gnu-1.08.003-match.sgf",
+        NATIVE_FIXTURES / "gnu-1.08.003-match.txt",
+        {"O": "sage", "X": "gnu"},
+        _frozen_gnu_sgf_application(config),
+    )
+    assert summary["final_score"] == [8, 0]
+
+
+@pytest.mark.parametrize(
+    "bad_application",
+    [
+        "GNU Backgammon:1.06.002",
+        "Other Backgammon:1.08.003",
+        "GNU Backgammon:1.08.004",
+        "GNU Backgammon 1.08.003",
+        "",
+    ],
+    ids=["obsolete-version", "wrong-application", "wrong-version", "malformed", "missing"],
+)
+def test_native_outputs_reject_nonruntime_sgf_application(
+    tmp_path: Path, bad_application: str,
+) -> None:
+    source = (NATIVE_FIXTURES / "gnu-1.08.003-match.sgf").read_text(encoding="utf-8")
+    replacement = f"AP[{bad_application}]" if bad_application else ""
+    sgf_path = tmp_path / "match.sgf"
+    sgf_path.write_text(
+        source.replace("AP[GNU Backgammon:1.08.003]", replacement), encoding="utf-8"
+    )
+    with pytest.raises(MatchExecutionError, match="AP|format"):
+        _validate_native_outputs(
+            sgf_path,
+            NATIVE_FIXTURES / "gnu-1.08.003-match.txt",
+            {"O": "sage", "X": "gnu"},
+            FROZEN_GNU_SGF_APPLICATION,
+        )
 
 
 @pytest.mark.parametrize("bad_sgf", ["", "(;FF[4]GM[6]", "junk(;FF[4]GM[6])"])
@@ -1241,7 +1289,10 @@ def test_native_outputs_reject_empty_truncated_or_outside_sgf(
     sgf_path.write_text(bad_sgf, encoding="utf-8")
     text_path.write_text(text, encoding="utf-8")
     with pytest.raises(MatchExecutionError, match="SGF"):
-        _validate_native_outputs(sgf_path, text_path, {"O": "sage", "X": "gnu"})
+        _validate_native_outputs(
+            sgf_path, text_path, {"O": "sage", "X": "gnu"},
+            FROZEN_GNU_SGF_APPLICATION,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1265,4 +1316,6 @@ def test_native_outputs_reject_invalid_text_game_structure(
     sgf_path.write_text(sgf, encoding="utf-8")
     text_path.write_text(mutation(text), encoding="utf-8")
     with pytest.raises(MatchExecutionError, match="match text"):
-        _validate_native_outputs(sgf_path, text_path, mapping)
+        _validate_native_outputs(
+            sgf_path, text_path, mapping, FROZEN_GNU_SGF_APPLICATION
+        )

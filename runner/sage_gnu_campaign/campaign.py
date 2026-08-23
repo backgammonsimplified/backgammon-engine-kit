@@ -27,7 +27,11 @@ from .manifests import (
     write_bytes_atomic,
     write_json,
 )
-from .match import PairExecutor, _validate_complete_native_evidence
+from .match import (
+    PairExecutor,
+    _frozen_gnu_sgf_application,
+    _validate_complete_native_evidence,
+)
 from .preflight import preflight
 
 
@@ -152,6 +156,7 @@ def publish_pair(
         _validate_complete_native_evidence(
             match,
             expected_engine_by_seat,
+            _frozen_gnu_sgf_application(config),
             identity=identity,
             match_side=side,
             roll_count=config.data["dice"]["roll_count_per_game_seat"],

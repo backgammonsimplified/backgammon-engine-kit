@@ -24,6 +24,7 @@ from .dice import (
     SeatDiceController,
     dice_record,
     namespace_seed,
+    stream_content,
     stream_id,
     stream_sha256,
 )
@@ -1309,6 +1310,11 @@ def _validate_publication_dice(
     streams = dice_manifest["streams"]
     stream_keys: set[tuple[int, str]] = set()
     active_games = {game["game_number"] for game in summary["games"]}
+    expected_stream_keys = {
+        (game_number, seat)
+        for game_number in range(1, files_per_match + 1)
+        for seat in ("O", "X")
+    }
     for stream in streams:
         if not isinstance(stream, dict):
             raise MatchExecutionError("deterministic dice stream identity is malformed")
@@ -1335,15 +1341,29 @@ def _validate_publication_dice(
             or len(stream["sha256"]) != 64
         ):
             raise MatchExecutionError("deterministic dice stream conflicts with pair/seat authority")
-        if game_number in active_games and stream["sha256"] != stream_sha256(
-            seed, game_number, seat, roll_count
-        ):
-            raise MatchExecutionError("active deterministic dice stream hash conflicts with frozen authority")
+        expected_content = stream_content(seed, game_number, seat, roll_count)
+        expected_sha256 = stream_sha256(seed, game_number, seat, roll_count)
+        if stream["sha256"] != expected_sha256:
+            raise MatchExecutionError("deterministic dice stream hash conflicts with frozen authority")
         stream_path = match_root / "dice" / expected_path
-        if stream_path.exists() and sha256_file(stream_path) != stream["sha256"]:
-            raise MatchExecutionError("deterministic dice stream file conflicts with its manifest hash")
-    if any((game_number, seat) not in stream_keys for game_number in active_games for seat in ("O", "X")):
-        raise MatchExecutionError("deterministic dice manifest lacks an active native-game stream")
+        if (
+            not stream_path.is_file()
+            or stream_path.is_symlink()
+            or stream_path.read_bytes() != expected_content
+            or sha256_file(stream_path) != stream["sha256"]
+        ):
+            raise MatchExecutionError("deterministic dice stream file conflicts with frozen content")
+    if stream_keys != expected_stream_keys:
+        raise MatchExecutionError("deterministic dice manifest lacks the exact frozen stream inventory")
+    csv_inventory = {
+        path.name for path in (match_root / "dice").glob("*.csv") if path.is_file()
+    }
+    expected_csv_inventory = {
+        f"game_{game_number:03d}_seat_{seat}.csv"
+        for game_number, seat in expected_stream_keys
+    }
+    if csv_inventory != expected_csv_inventory:
+        raise MatchExecutionError("deterministic dice CSV inventory differs from frozen authority")
 
     game_records: dict[int, list[dict[str, Any]]] = {number: [] for number in active_games}
     last_game = 0

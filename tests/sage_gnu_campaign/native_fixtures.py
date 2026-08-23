@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from runner.sage_gnu_campaign.config import load_campaign_config
-from runner.sage_gnu_campaign.dice import dice_record, namespace_seed, stream_id, stream_sha256
+from runner.sage_gnu_campaign.dice import (
+    dice_record,
+    namespace_seed,
+    stream_content,
+    stream_id,
+    stream_sha256,
+)
 from runner.sage_gnu_campaign.manifests import write_json
 
 
@@ -425,6 +431,11 @@ def write_complete_match(
 
     dice = match / "dice"
     dice.mkdir()
+    for game_number in range(1, 26):
+        for seat in ("O", "X"):
+            filename = f"game_{game_number:03d}_seat_{seat}.csv"
+            expected_content = stream_content(seed, game_number, seat, 50000)
+            (dice / filename).write_bytes(expected_content)
     consumption_records: list[dict[str, Any]] = []
     for game in summary["games"]:
         game_number = game["game_number"]
@@ -739,7 +750,7 @@ def write_complete_match(
                 "path": f"game_{game_number:03d}_seat_{seat}.csv",
                 "sha256": stream_sha256(seed, game_number, seat, 50000),
             }
-            for game_number in range(1, len(games) + 1)
+            for game_number in range(1, 26)
             for seat in ("O", "X")
         ],
         "consumption": {

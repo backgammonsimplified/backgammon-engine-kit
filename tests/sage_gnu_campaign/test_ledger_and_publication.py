@@ -617,6 +617,72 @@ def test_publication_rejects_equal_dice_collision_identity_substitution(
 @pytest.mark.parametrize(
     "case",
     [
+        "missing-active-csv", "missing-inactive-csv", "missing-manifest-entry",
+        "extra-stream-entry", "extra-csv", "forged-inactive-hash",
+        "modified-inactive-csv", "wrong-slot", "wrong-seat", "wrong-namespace",
+        "duplicate-stream-id",
+    ],
+)
+def test_publication_requires_complete_frozen_dice_stream_inventory(
+    tmp_path: Path, case: str,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    write_execution_fixture(execution, identity)
+    match = execution / "matches/A"
+    dice_root = match / "dice"
+    dice_manifest_path = dice_root / "seat_dice_manifest.json"
+    dice_manifest = json.loads(dice_manifest_path.read_text())
+    inactive = next(
+        stream for stream in dice_manifest["streams"] if stream["game_number"] == 25
+    )
+    if case == "missing-active-csv":
+        (dice_root / "game_001_seat_O.csv").unlink()
+    elif case == "missing-inactive-csv":
+        (dice_root / inactive["path"]).unlink()
+    elif case == "missing-manifest-entry":
+        dice_manifest["streams"].remove(inactive)
+    elif case == "extra-stream-entry":
+        dice_manifest["streams"].append(dict(inactive))
+    elif case == "extra-csv":
+        (dice_root / "game_026_seat_O.csv").write_bytes(b"extra\r\n")
+    elif case == "forged-inactive-hash":
+        inactive["sha256"] = "0" * 64
+    elif case == "modified-inactive-csv":
+        path = dice_root / inactive["path"]
+        path.write_bytes(path.read_bytes() + b"forged\r\n")
+    elif case == "wrong-slot":
+        inactive["game_number"] = 26
+    elif case == "wrong-seat":
+        inactive["physical_seat"] = "X" if inactive["physical_seat"] == "O" else "O"
+    elif case == "wrong-namespace":
+        inactive["namespace"] = "B"
+    elif case == "duplicate-stream-id":
+        inactive["stream_id"] = dice_manifest["streams"][0]["stream_id"]
+    if case not in {
+        "missing-active-csv", "missing-inactive-csv", "extra-csv", "modified-inactive-csv",
+    }:
+        write_json(dice_manifest_path, dice_manifest)
+        manifest_path = match / "match_manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["output_sha256"]["dice/seat_dice_manifest.json"] = hashlib.sha256(
+            dice_manifest_path.read_bytes()
+        ).hexdigest()
+        write_json(manifest_path, manifest)
+
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    with pytest.raises(MatchExecutionError, match="dice|stream|CSV"):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
         "text-truncated-after-game-1",
         "text-missing-final-game",
         "text-missing-middle-game",

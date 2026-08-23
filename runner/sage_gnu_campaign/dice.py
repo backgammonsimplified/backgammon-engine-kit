@@ -66,6 +66,7 @@ def stream_rows(seed: str, game_number: int, seat: str, roll_count: int) -> list
     return [dice_record(seed, 1, 7, game_number, seat, index) for index in range(1, roll_count + 1)]
 
 
+@lru_cache(maxsize=128)
 def stream_content(seed: str, game_number: int, seat: str, roll_count: int) -> bytes:
     lines = ["roll_index,opening_die,die1,die2"]
     for record in stream_rows(seed, game_number, seat, roll_count):

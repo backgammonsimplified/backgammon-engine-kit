@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import urllib.request
 import venv
 from pathlib import Path
@@ -18,6 +19,8 @@ from .manifests import fsync_directory, path_identity, sha256_file, write_bytes_
 
 
 ENVIRONMENT_SCHEMA = "sage-gnu-runner-environment-v2"
+LEGACY_PUBLIC_RUNNER_AUTHORITY = "96cbed94dbf6435ab54ff23de4ccdade7da640af"
+LEGACY_MIGRATION_PROTOCOL = "pinned-public-artifact-rebuild-v1"
 
 
 class RunnerEnvironmentError(RuntimeError):
@@ -237,6 +240,237 @@ def _download_release_wheel(config: CampaignConfig) -> bytes:
     return payload
 
 
+def _read_environment_manifest(workspace: Path) -> tuple[dict[str, Any], str]:
+    manifest_path = workspace / "environment_manifest.json"
+    try:
+        payload = manifest_path.read_bytes()
+        manifest = json.loads(payload)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunnerEnvironmentError("campaign runner environment manifest is unreadable") from exc
+    if not isinstance(manifest, dict):
+        raise RunnerEnvironmentError("campaign runner environment manifest is malformed")
+    return manifest, hashlib.sha256(payload).hexdigest()
+
+
+def _validate_legacy_migration_authority(
+    config: CampaignConfig,
+    repository: Path,
+    runtime_root: Path,
+    manifest: dict[str, Any],
+) -> None:
+    """Authorize only the exact public-runner manifest shape shipped at 96cbed9."""
+    if manifest.get("schema_version") != ENVIRONMENT_SCHEMA:
+        raise RunnerEnvironmentError("runner environment schema is not explicitly migratable")
+    legacy_fields = {
+        "schema_version",
+        "campaign_id",
+        "campaign_configuration_sha256",
+        "engine_kit_source_commit",
+        "engine_kit_release_commit",
+        "engine_kit_package",
+        "dependency_lock",
+        "python",
+        "freeze_file",
+        "freeze_sha256",
+        "environment_path_identity",
+    }
+    if set(manifest) != legacy_fields:
+        raise RunnerEnvironmentError("runner environment is not the exact migratable public manifest")
+    kit = config.data["engine_kit"]
+    expected = {
+        "campaign_id": config.campaign_id,
+        "campaign_configuration_sha256": config.content_sha256,
+        "engine_kit_source_commit": kit["source_commit"],
+        "engine_kit_release_commit": kit["release_commit"],
+        "freeze_file": "requirements.freeze.txt",
+        "environment_path_identity": path_identity(
+            runner_venv(config, runtime_root), "campaign-runner-venv"
+        ),
+    }
+    conflicts = [key for key, value in expected.items() if manifest.get(key) != value]
+    if conflicts:
+        raise RunnerEnvironmentError(
+            "legacy runner environment authority mismatch: " + ", ".join(conflicts)
+        )
+
+    package = manifest.get("engine_kit_package")
+    expected_package = {
+        "distribution_name": "backgammon-engine-kit",
+        "distribution_version": "0.4.0",
+        "wheel_filename": kit["release"]["wheel_filename"],
+        "wheel_sha256": kit["release"]["wheel_sha256"],
+        "wheel_source_url": _release_wheel_url(config),
+        "installation_mode": "public-release-wheel-plus-hash-lock",
+    }
+    if (
+        not isinstance(package, dict)
+        or set(package) != {*expected_package, "record_sha256"}
+        or any(package.get(key) != value for key, value in expected_package.items())
+        or not isinstance(package.get("record_sha256"), str)
+        or len(package["record_sha256"]) != 64
+    ):
+        raise RunnerEnvironmentError("legacy Engine Kit package identity mismatch")
+
+    lock_authority = _dependency_lock(config, repository)
+    lock = manifest.get("dependency_lock")
+    expected_lock = {
+        "filename": "requirements-production.lock",
+        "sha256": kit["production_dependency_lock"]["sha256"],
+        "install_mode": "pip-install-require-hashes",
+    }
+    if not isinstance(lock, dict) or lock != expected_lock:
+        raise RunnerEnvironmentError("legacy dependency lock authority mismatch")
+    workspace = runner_workspace(config, runtime_root)
+    lock_copy = workspace / expected_lock["filename"]
+    wheel = workspace / "wheelhouse" / expected_package["wheel_filename"]
+    freeze = workspace / "requirements.freeze.txt"
+    if (
+        not wheel.is_file()
+        or sha256_file(wheel) != expected_package["wheel_sha256"]
+        or not lock_copy.is_file()
+        or sha256_file(lock_copy) != expected_lock["sha256"]
+        or lock_copy.read_bytes() != lock_authority.read_bytes()
+    ):
+        raise RunnerEnvironmentError("legacy pinned artifact authority mismatch")
+    if (
+        not freeze.is_file()
+        or sha256_file(freeze) != manifest.get("freeze_sha256")
+        or not isinstance(manifest.get("python"), dict)
+        or set(manifest["python"]) != {
+            "executable_name",
+            "executable_sha256",
+            "version",
+        }
+        or not isinstance(manifest["python"].get("executable_sha256"), str)
+        or len(manifest["python"]["executable_sha256"]) != 64
+    ):
+        raise RunnerEnvironmentError("legacy runner provenance is incomplete")
+
+
+def _construct_runner_environment(
+    config: CampaignConfig,
+    repository: Path,
+    runtime_root: Path,
+    build_root: Path,
+    *,
+    final_environment_root: Path,
+    controlled_migration: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a candidate solely from current pinned public artifact authority."""
+    lock_authority = _dependency_lock(config, repository)
+    environment_root = build_root / ".venv"
+    wheelhouse = build_root / "wheelhouse"
+    wheelhouse.mkdir()
+    wheel = wheelhouse / config.data["engine_kit"]["release"]["wheel_filename"]
+    lock_copy = build_root / "requirements-production.lock"
+    write_bytes_atomic(wheel, _download_release_wheel(config))
+    write_bytes_atomic(lock_copy, lock_authority.read_bytes())
+    venv.EnvBuilder(with_pip=True, symlinks=True).create(environment_root)
+    python = environment_root / "bin" / "python"
+    _run([str(python), "-m", "pip", "install", "--require-hashes", "-r", str(lock_copy)])
+    _run([str(python), "-m", "pip", "install", "--no-deps", str(wheel)])
+    _run([str(python), "-m", "pip", "check"])
+    freeze = _freeze(python)
+    write_bytes_atomic(build_root / "requirements.freeze.txt", freeze)
+    observed = _probe_subprocess(python)
+    _validate_import_location(observed, environment_root)
+    version = _run([str(python), "--version"])
+    kit = config.data["engine_kit"]
+    manifest = {
+        "schema_version": ENVIRONMENT_SCHEMA,
+        "campaign_id": config.campaign_id,
+        "campaign_configuration_sha256": config.content_sha256,
+        "engine_kit_source_commit": kit["source_commit"],
+        "engine_kit_release_commit": kit["release_commit"],
+        "directory_durability": _directory_durability_identity(config, runtime_root),
+        "engine_kit_package": {
+            "distribution_name": observed["distribution_name"],
+            "distribution_version": observed["distribution_version"],
+            "wheel_filename": wheel.name,
+            "wheel_sha256": sha256_file(wheel),
+            "wheel_source_url": _release_wheel_url(config),
+            "record_sha256": observed["record_sha256"],
+            "installation_mode": "public-release-wheel-plus-hash-lock",
+        },
+        "dependency_lock": {
+            "filename": lock_copy.name,
+            "sha256": sha256_file(lock_copy),
+            "install_mode": "pip-install-require-hashes",
+        },
+        "python": {
+            "executable_name": Path(observed["executable"]).name,
+            "executable_sha256": sha256_file(python),
+            "version": version.stdout.strip() or version.stderr.strip(),
+        },
+        "freeze_file": "requirements.freeze.txt",
+        "freeze_sha256": hashlib.sha256(freeze).hexdigest(),
+        "environment_content_sha256": _environment_content_sha256(environment_root),
+        "environment_path_identity": path_identity(
+            final_environment_root, "campaign-runner-venv"
+        ),
+    }
+    if controlled_migration is not None:
+        manifest["controlled_migration"] = controlled_migration
+    return manifest
+
+
+def _migrate_legacy_runner_environment(
+    config: CampaignConfig,
+    repository: Path,
+    runtime_root: Path,
+    workspace: Path,
+    legacy_manifest_sha256: str,
+) -> dict[str, Any]:
+    migration = {
+        "protocol": LEGACY_MIGRATION_PROTOCOL,
+        "from_public_runner_authority": LEGACY_PUBLIC_RUNNER_AUTHORITY,
+        "legacy_environment_manifest_sha256": legacy_manifest_sha256,
+    }
+    staging = Path(tempfile.mkdtemp(prefix=".environment-migration-", dir=workspace))
+    fsync_directory(staging)
+    fsync_directory(workspace)
+    try:
+        candidate = _construct_runner_environment(
+            config,
+            repository,
+            runtime_root,
+            staging,
+            final_environment_root=workspace / ".venv",
+            controlled_migration=migration,
+        )
+        # The old installation is evidence only. It never contributes bytes or identity
+        # to the candidate reconstructed from the pinned wheel and committed hash lock.
+        suffix = legacy_manifest_sha256[:12]
+        for name in (".venv", "wheelhouse"):
+            current = workspace / name
+            if current.exists():
+                backup = workspace / f".legacy-{name.lstrip('.')}-{suffix}"
+                if backup.exists():
+                    raise RunnerEnvironmentError("legacy migration evidence path already exists")
+                os.replace(current, backup)
+                fsync_directory(workspace)
+            os.replace(staging / name, current)
+            fsync_directory(workspace)
+        for name in ("requirements-production.lock", "requirements.freeze.txt"):
+            os.replace(staging / name, workspace / name)
+            fsync_directory(workspace)
+        if _environment_content_sha256(workspace / ".venv") != candidate["environment_content_sha256"]:
+            raise RunnerEnvironmentError("rebuilt runner environment content verification failed")
+        write_json(workspace / "environment_manifest.json", candidate)
+        verified = verify_runner_environment(
+            config, repository, runtime_root, require_active=False
+        )
+        staging.rmdir()
+        fsync_directory(workspace)
+        return verified
+    except Exception as exc:
+        if isinstance(exc, RunnerEnvironmentError):
+            raise
+        raise RunnerEnvironmentError(
+            f"legacy runner environment rebuild failed; preserved migration evidence: {staging}"
+        ) from exc
+
+
 def verify_runner_environment(
     config: CampaignConfig,
     repository: Path,
@@ -253,10 +487,7 @@ def verify_runner_environment(
     lock_copy = workspace / "requirements-production.lock"
     if not manifest_path.is_file() or not freeze_path.is_file() or not environment_root.is_dir():
         raise RunnerEnvironmentError("campaign runner environment is absent or incomplete; run bootstrap")
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RunnerEnvironmentError("campaign runner environment manifest is unreadable") from exc
+    manifest, _ = _read_environment_manifest(workspace)
     kit = config.data["engine_kit"]
     expected = {
         "schema_version": ENVIRONMENT_SCHEMA,
@@ -275,6 +506,11 @@ def verify_runner_environment(
     package = manifest.get("engine_kit_package", {})
     if package.get("installation_mode") != "public-release-wheel-plus-hash-lock":
         raise RunnerEnvironmentError("Engine Kit installation mode is not public-release-wheel-plus-hash-lock")
+    if (
+        package.get("wheel_filename") != kit["release"]["wheel_filename"]
+        or package.get("wheel_sha256") != kit["release"]["wheel_sha256"]
+    ):
+        raise RunnerEnvironmentError("Engine Kit package wheel authority mismatch")
     wheel = wheelhouse / str(package.get("wheel_filename", ""))
     if not wheel.is_file() or sha256_file(wheel) != kit["release"]["wheel_sha256"]:
         raise RunnerEnvironmentError("Engine Kit runner wheel identity mismatch")
@@ -327,6 +563,19 @@ def bootstrap_runner_environment(config: CampaignConfig, repository: Path, runti
     workspace_existed = runner_workspace(config, runtime_root).exists()
     workspace = durably_establish_runner_workspace(config, runtime_root)
     if workspace_existed:
+        if not (workspace / "environment_manifest.json").is_file():
+            verify_runner_environment(
+                config, repository, runtime_root, require_active=False
+            )
+        existing, existing_sha256 = _read_environment_manifest(workspace)
+        if "environment_content_sha256" not in existing:
+            _validate_legacy_migration_authority(
+                config, repository, runtime_root, existing
+            )
+            manifest = _migrate_legacy_runner_environment(
+                config, repository, runtime_root, workspace, existing_sha256
+            )
+            return {"status": "migrated", "runner_environment": manifest}
         manifest = verify_runner_environment(
             config,
             repository,
@@ -346,57 +595,14 @@ def bootstrap_runner_environment(config: CampaignConfig, repository: Path, runti
             )
         return {"status": "reconciled", "runner_environment": manifest}
 
-    lock_authority = _dependency_lock(config, repository)
-    environment_root = workspace / ".venv"
-    wheelhouse = workspace / "wheelhouse"
-    wheelhouse.mkdir()
-    wheel = wheelhouse / config.data["engine_kit"]["release"]["wheel_filename"]
-    lock_copy = workspace / "requirements-production.lock"
     try:
-        write_bytes_atomic(wheel, _download_release_wheel(config))
-        write_bytes_atomic(lock_copy, lock_authority.read_bytes())
-        venv.EnvBuilder(with_pip=True, symlinks=True).create(environment_root)
-        python = environment_root / "bin" / "python"
-        _run([str(python), "-m", "pip", "install", "--require-hashes", "-r", str(lock_copy)])
-        _run([str(python), "-m", "pip", "install", "--no-deps", str(wheel)])
-        _run([str(python), "-m", "pip", "check"])
-        freeze = _freeze(python)
-        write_bytes_atomic(workspace / "requirements.freeze.txt", freeze)
-        observed = _probe_subprocess(python)
-        _validate_import_location(observed, environment_root)
-        version = _run([str(python), "--version"])
-        kit = config.data["engine_kit"]
-        manifest = {
-            "schema_version": ENVIRONMENT_SCHEMA,
-            "campaign_id": config.campaign_id,
-            "campaign_configuration_sha256": config.content_sha256,
-            "engine_kit_source_commit": kit["source_commit"],
-            "engine_kit_release_commit": kit["release_commit"],
-            "directory_durability": _directory_durability_identity(config, runtime_root),
-            "engine_kit_package": {
-                "distribution_name": observed["distribution_name"],
-                "distribution_version": observed["distribution_version"],
-                "wheel_filename": wheel.name,
-                "wheel_sha256": sha256_file(wheel),
-                "wheel_source_url": _release_wheel_url(config),
-                "record_sha256": observed["record_sha256"],
-                "installation_mode": "public-release-wheel-plus-hash-lock",
-            },
-            "dependency_lock": {
-                "filename": lock_copy.name,
-                "sha256": sha256_file(lock_copy),
-                "install_mode": "pip-install-require-hashes",
-            },
-            "python": {
-                "executable_name": Path(observed["executable"]).name,
-                "executable_sha256": sha256_file(python),
-                "version": version.stdout.strip() or version.stderr.strip(),
-            },
-            "freeze_file": "requirements.freeze.txt",
-            "freeze_sha256": hashlib.sha256(freeze).hexdigest(),
-            "environment_content_sha256": _environment_content_sha256(environment_root),
-            "environment_path_identity": path_identity(environment_root, "campaign-runner-venv"),
-        }
+        manifest = _construct_runner_environment(
+            config,
+            repository,
+            runtime_root,
+            workspace,
+            final_environment_root=workspace / ".venv",
+        )
         write_json(workspace / "environment_manifest.json", manifest)
         verified = verify_runner_environment(config, repository, runtime_root, require_active=False)
         return {"status": "created", "runner_environment": verified}

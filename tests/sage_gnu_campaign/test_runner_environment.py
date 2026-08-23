@@ -119,9 +119,17 @@ def _environment_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tup
             "sha256": sha256_file(lock),
             "install_mode": "pip-install-require-hashes",
         },
-        "python": {"executable_sha256": sha256_file(python)},
+        "python": {
+            "executable_name": python.name,
+            "executable_sha256": sha256_file(python),
+            "version": "Python 3.11",
+        },
+        "freeze_file": "requirements.freeze.txt",
         "freeze_sha256": hashlib.sha256(freeze).hexdigest(),
         "environment_content_sha256": _environment_content_sha256(environment),
+        "environment_path_identity": module.path_identity(
+            environment, "campaign-runner-venv"
+        ),
     }
     write_json(workspace / "environment_manifest.json", manifest)
     return config, repository, runtime
@@ -163,6 +171,234 @@ def test_existing_legacy_environment_records_established_durable_anchor(
     assert result["runner_environment"]["directory_durability"]["protocol"] == (
         "runtime-root-directory-fsync-v1"
     )
+
+
+def _legacy_public_environment_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[object, Path, Path, list[list[str]]]:
+    import runner.sage_gnu_campaign.environment as module
+
+    config, repository, runtime = _environment_fixture(tmp_path, monkeypatch)
+    workspace = runner_workspace(config, runtime)
+    environment = runner_venv(config, runtime)
+    (environment / "mutated-after-bootstrap.txt").write_text(
+        "must never be inherited\n", encoding="utf-8"
+    )
+    manifest_path = workspace / "environment_manifest.json"
+    legacy = json.loads(manifest_path.read_text(encoding="utf-8"))
+    legacy.pop("environment_content_sha256")
+    legacy.pop("directory_durability")
+    write_json(manifest_path, legacy)
+    commands: list[list[str]] = []
+
+    class FakeEnvBuilder:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def create(self, root: Path) -> None:
+            root = Path(root)
+            site = root / "lib/python3.11/site-packages"
+            (site / "backgammon_engine_kit").mkdir(parents=True)
+            (site / "backgammon_engine_kit/__init__.py").write_text(
+                "trusted_rebuild = True\n", encoding="utf-8"
+            )
+            dist_info = site / "backgammon_engine_kit-0.4.0.dist-info"
+            dist_info.mkdir()
+            (dist_info / "RECORD").write_text("trusted record\n", encoding="utf-8")
+            python = root / "bin/python"
+            python.parent.mkdir()
+            python.write_text("trusted python\n", encoding="utf-8")
+
+    def fake_run(command: list[str], **_: object) -> SimpleNamespace:
+        commands.append(command)
+        return SimpleNamespace(stdout="Python 3.11\n", stderr="", returncode=0)
+
+    def fake_probe(python: Path) -> dict[str, object]:
+        root = Path(python).parents[1]
+        site = root / "lib/python3.11/site-packages"
+        dist_info = site / "backgammon_engine_kit-0.4.0.dist-info"
+        return {
+            "prefix": str(root),
+            "executable": str(python),
+            "module_file": str(site / "backgammon_engine_kit/__init__.py"),
+            "dist_info": str(dist_info),
+            "distribution_name": "backgammon-engine-kit",
+            "distribution_version": "0.4.0",
+            "record_sha256": sha256_file(dist_info / "RECORD"),
+            "direct_url": None,
+        }
+
+    wheel = workspace / "wheelhouse" / config.data["engine_kit"]["release"]["wheel_filename"]
+    monkeypatch.setattr(module, "_download_release_wheel", lambda _: wheel.read_bytes())
+    monkeypatch.setattr(module.venv, "EnvBuilder", FakeEnvBuilder)
+    monkeypatch.setattr(module, "_run", fake_run)
+    monkeypatch.setattr(module, "_freeze", lambda _: b"backgammon-engine-kit==0.4.0\n")
+    monkeypatch.setattr(module, "_probe_subprocess", fake_probe)
+    return config, repository, runtime, commands
+
+
+def test_exact_public_legacy_environment_is_rebuilt_from_pinned_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, repository, runtime, commands = _legacy_public_environment_fixture(
+        tmp_path, monkeypatch
+    )
+    result = bootstrap_runner_environment(config, repository, runtime)
+    workspace = runner_workspace(config, runtime)
+    manifest = result["runner_environment"]
+    assert result["status"] == "migrated"
+    assert len(manifest["environment_content_sha256"]) == 64
+    assert manifest["directory_durability"]["protocol"] == "runtime-root-directory-fsync-v1"
+    assert manifest["controlled_migration"]["from_public_runner_authority"].startswith("96cbed9")
+    assert manifest["controlled_migration"]["protocol"] == "pinned-public-artifact-rebuild-v1"
+    assert not (runner_venv(config, runtime) / "mutated-after-bootstrap.txt").exists()
+    preserved = list(workspace.glob(".legacy-venv-*"))
+    assert len(preserved) == 1
+    assert (preserved[0] / "mutated-after-bootstrap.txt").is_file()
+    assert any("--require-hashes" in command for command in commands)
+    assert any("--no-deps" in command for command in commands)
+    assert not list(workspace.glob(".environment_manifest.json.tmp-*"))
+    assert verify_runner_environment(
+        config, repository, runtime, require_active=False
+    )["environment_content_sha256"] == manifest["environment_content_sha256"]
+
+
+def test_successful_legacy_migration_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, repository, runtime, commands = _legacy_public_environment_fixture(
+        tmp_path, monkeypatch
+    )
+    first = bootstrap_runner_environment(config, repository, runtime)
+    command_count = len(commands)
+    second = bootstrap_runner_environment(config, repository, runtime)
+    assert first["status"] == "migrated"
+    assert second["status"] == "reconciled"
+    assert len(commands) == command_count
+    assert second["runner_environment"]["controlled_migration"] == first["runner_environment"]["controlled_migration"]
+
+
+def test_preflight_environment_validation_succeeds_after_legacy_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import runner.sage_gnu_campaign.environment as environment_module
+    import runner.sage_gnu_campaign.preflight as preflight_module
+
+    config, repository, runtime, _ = _legacy_public_environment_fixture(
+        tmp_path, monkeypatch
+    )
+    migrated = bootstrap_runner_environment(config, repository, runtime)["runner_environment"]
+    environment = runner_venv(config, runtime)
+    python = environment / "bin/python"
+    site = environment / "lib/python3.11/site-packages"
+    monkeypatch.setattr(environment_module.sys, "prefix", str(environment))
+    monkeypatch.setattr(environment_module.sys, "executable", str(python))
+    monkeypatch.setattr(
+        environment_module,
+        "_distribution_identity",
+        lambda: {
+            "distribution_name": "backgammon-engine-kit",
+            "distribution_version": "0.4.0",
+            "module_file": str(site / "backgammon_engine_kit/__init__.py"),
+            "dist_info": str(site / "backgammon_engine_kit-0.4.0.dist-info"),
+            "record_sha256": migrated["engine_kit_package"]["record_sha256"],
+            "direct_url": None,
+        },
+    )
+    monkeypatch.setattr(preflight_module, "validate_roots", lambda *_: {})
+    monkeypatch.setattr(preflight_module, "benchmarker_git_identity", lambda *_: {"clean": True})
+    monkeypatch.setattr(preflight_module, "engine_kit_release_identity", lambda *_: {})
+    result = preflight_module.preflight(
+        config,
+        REPO,
+        runtime,
+        tmp_path / "artifacts",
+        require_clean_benchmarker=True,
+        load_engine_runtime=False,
+    )
+    assert result["status"] == "pass"
+    assert result["runner_environment"]["controlled_migration"]["protocol"] == (
+        "pinned-public-artifact-rebuild-v1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda manifest: manifest["engine_kit_package"].__setitem__("wheel_sha256", "0" * 64), "package identity"),
+        (lambda manifest: manifest["dependency_lock"].__setitem__("sha256", "0" * 64), "lock authority"),
+        (lambda manifest: manifest.__setitem__("schema_version", "unknown-environment-v99"), "not explicitly migratable"),
+    ],
+)
+def test_legacy_migration_rejects_wrong_artifact_or_schema_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: object,
+    message: str,
+) -> None:
+    config, repository, runtime, commands = _legacy_public_environment_fixture(
+        tmp_path, monkeypatch
+    )
+    manifest_path = runner_workspace(config, runtime) / "environment_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    mutation(manifest)  # type: ignore[operator]
+    write_json(manifest_path, manifest)
+    with pytest.raises(RunnerEnvironmentError, match=message):
+        bootstrap_runner_environment(config, repository, runtime)
+    assert commands == []
+    assert (runner_venv(config, runtime) / "mutated-after-bootstrap.txt").is_file()
+
+
+def test_legacy_rebuild_failure_does_not_bless_old_or_partial_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import runner.sage_gnu_campaign.environment as module
+
+    config, repository, runtime, _ = _legacy_public_environment_fixture(
+        tmp_path, monkeypatch
+    )
+    workspace = runner_workspace(config, runtime)
+    manifest_path = workspace / "environment_manifest.json"
+    legacy_payload = manifest_path.read_bytes()
+
+    def fail_install(command: list[str], **_: object) -> SimpleNamespace:
+        if "install" in command:
+            raise RunnerEnvironmentError("simulated trusted rebuild failure")
+        return SimpleNamespace(stdout="Python 3.11\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(module, "_run", fail_install)
+    with pytest.raises(RunnerEnvironmentError, match="trusted rebuild failure"):
+        bootstrap_runner_environment(config, repository, runtime)
+    assert manifest_path.read_bytes() == legacy_payload
+    assert "environment_content_sha256" not in json.loads(legacy_payload)
+    assert (runner_venv(config, runtime) / "mutated-after-bootstrap.txt").is_file()
+    assert list(workspace.glob(".environment-migration-*"))
+
+
+def test_legacy_final_content_verification_failure_does_not_write_current_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import runner.sage_gnu_campaign.environment as module
+
+    config, repository, runtime, _ = _legacy_public_environment_fixture(
+        tmp_path, monkeypatch
+    )
+    manifest_path = runner_workspace(config, runtime) / "environment_manifest.json"
+    legacy_payload = manifest_path.read_bytes()
+    real_inventory = module._environment_content_sha256
+    calls = 0
+
+    def mismatch_after_rebuild(path: Path) -> str:
+        nonlocal calls
+        calls += 1
+        value = real_inventory(path)
+        return value if calls == 1 else ("0" * 64)
+
+    monkeypatch.setattr(module, "_environment_content_sha256", mismatch_after_rebuild)
+    with pytest.raises(RunnerEnvironmentError, match="content verification"):
+        bootstrap_runner_environment(config, repository, runtime)
+    assert manifest_path.read_bytes() == legacy_payload
+    assert "environment_content_sha256" not in json.loads(legacy_payload)
 
 
 def test_runner_workspace_creation_is_durably_anchored_at_runtime_root(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 import hashlib
@@ -31,6 +32,51 @@ REPO = Path(__file__).resolve().parents[2]
 CONFIG = REPO / "experiments/sage-gnu-campaign-v1/campaign.json"
 BENCHMARKER_COMMIT = "a" * 40
 ENGINE_KIT_COMMIT = "833929ea72ccec058527f3cd1fa0b54a07ac666b"
+
+
+def _rewrite_match_id(
+    gnuid: str, *, score_delta: tuple[int, int] = (0, 0), match_length: int | None = None,
+) -> str:
+    position_id, match_id = gnuid.split(":")
+    data = bytearray(base64.b64decode(match_id + "=" * (-len(match_id) % 4)))
+
+    def get_bits(start: int, width: int) -> int:
+        return sum(((data[(start + bit) // 8] >> ((start + bit) % 8)) & 1) << bit for bit in range(width))
+
+    def set_bits(start: int, width: int, value: int) -> None:
+        for bit in range(width):
+            index = start + bit
+            mask = 1 << (index % 8)
+            if (value >> bit) & 1:
+                data[index // 8] |= mask
+            else:
+                data[index // 8] &= ~mask
+
+    set_bits(21, 15, match_length if match_length is not None else get_bits(21, 15))
+    set_bits(36, 15, get_bits(36, 15) + score_delta[0])
+    set_bits(51, 15, get_bits(51, 15) + score_delta[1])
+    encoded = base64.b64encode(bytes(data)).decode("ascii").rstrip("=")
+    return f"{position_id}:{encoded}"
+
+
+def _replace_gnuid(value, old: str, new: str):
+    if isinstance(value, dict):
+        return {key: _replace_gnuid(item, old, new) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_gnuid(item, old, new) for item in value]
+    return new if value == old else value
+
+
+def _shift_all_gnuids(value, delta: tuple[int, int]):
+    if isinstance(value, dict):
+        return {key: _shift_all_gnuids(item, delta) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_shift_all_gnuids(item, delta) for item in value]
+    if isinstance(value, str) and value.count(":") == 1:
+        position_id, match_id = value.split(":")
+        if len(position_id) == 14 and len(match_id) == 12:
+            return _rewrite_match_id(value, score_delta=delta)
+    return value
 
 
 class Clock:
@@ -424,6 +470,80 @@ def test_publication_requires_exact_connected_decision_state_machine(
     artifact_root = tmp_path / "artifacts"
     artifact_root.mkdir()
     with pytest.raises(MatchExecutionError):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "all-scores-shifted",
+        "pre-score-shifted",
+        "post-score-shifted",
+        "wrong-match-length",
+        "terminal-delta-from-wrong-start",
+        "other-game-score-state",
+    ],
+)
+def test_publication_reconciles_absolute_gnuid_scores_and_match_length(
+    tmp_path: Path, case: str,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    games = [("O", 2), ("O", 6)] if case == "other-game-score-state" else None
+    write_execution_fixture(execution, identity, games)
+    match = execution / "matches/A"
+    paths = {
+        name: match / name
+        for name in ("decisions.jsonl", "analysis_requests.jsonl", "analysis_results.jsonl")
+    }
+    evidence = {
+        name: [json.loads(line) for line in path.read_text().splitlines()]
+        for name, path in paths.items()
+    }
+    decisions = evidence["decisions.jsonl"]
+    if case in {"all-scores-shifted", "terminal-delta-from-wrong-start"}:
+        evidence = {
+            name: _shift_all_gnuids(records, (1, 1))
+            for name, records in evidence.items()
+        }
+    else:
+        if case == "post-score-shifted":
+            old = decisions[-1]["transition_evidence"]["post_command"]["gnuid"]
+            new = _rewrite_match_id(old, score_delta=(1, 0))
+        elif case == "other-game-score-state":
+            old = decisions[0]["gnuid"]
+            new = next(item for item in decisions if item["game_number"] == 2)["gnuid"]
+        else:
+            old = decisions[0]["gnuid"]
+            new = _rewrite_match_id(
+                old,
+                score_delta=(1, 0) if case == "pre-score-shifted" else (0, 0),
+                match_length=9 if case == "wrong-match-length" else None,
+            )
+        evidence = {
+            name: _replace_gnuid(records, old, new)
+            for name, records in evidence.items()
+        }
+    for name, path in paths.items():
+        path.write_text(
+            "".join(json.dumps(item, sort_keys=True) + "\n" for item in evidence[name]),
+            encoding="utf-8",
+        )
+    manifest_path = match / "match_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for path in paths.values():
+        manifest["output_sha256"][str(path.relative_to(match))] = hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+    write_json(manifest_path, manifest)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+
+    with pytest.raises(MatchExecutionError, match="score|match length|initial state"):
         publish_pair(
             execution, artifact_root, config, identity, publication_common(),
             {"attempt_count": 1, "transitions": []},

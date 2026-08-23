@@ -1248,6 +1248,14 @@ def _validate_publication_decisions(
             post_position = _decode_publication_gnuid(post["gnuid"])
         except MatchExecutionError as exc:
             raise MatchExecutionError("decision journal contains an invalid publication GNUID") from exc
+        if _score_snapshot(pre_position) != (*pre["score"], 7):
+            raise MatchExecutionError(
+                "decision pre-command GNUID score or match length conflicts with journal authority"
+            )
+        if _score_snapshot(post_position) != (*post["score"], 7):
+            raise MatchExecutionError(
+                "decision post-command GNUID score or match length conflicts with journal authority"
+            )
         if game_number not in validated_initial_states:
             sgf_state = game.get("sgf_state")
             if not isinstance(sgf_state, dict) or not isinstance(sgf_state.get("setup"), dict):

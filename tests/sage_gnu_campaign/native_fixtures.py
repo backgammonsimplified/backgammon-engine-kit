@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+import copy
+import math
 import json
 from pathlib import Path
 from typing import Any
@@ -31,6 +34,119 @@ def _game_actions(
     terminal_kind: str = "ordinary_game_over",
 ) -> list[dict[str, Any]]:
     loser = "X" if winner == "O" else "O"
+    if seed is not None:
+        opening_index = 1
+        while True:
+            o_opening = dice_record(seed, 1, 7, game_number, "O", opening_index)["opening_die"]
+            x_opening = dice_record(seed, 1, 7, game_number, "X", opening_index)["opening_die"]
+            if o_opening != x_opening:
+                break
+            opening_index += 1
+        opener = "O" if o_opening > x_opening else "X"
+        actions: list[dict[str, Any]] = [{"action": "checker", "physical_seat": opener}]
+        current = "X" if opener == "O" else "O"
+        cube_value = 1
+        cube_owner = "center"
+        if terminal_kind == "drop":
+            if points != 1:
+                raise ValueError("drop fixture currently requires one point")
+            while current != winner:
+                actions.append({"action": "checker", "physical_seat": current})
+                current = "X" if current == "O" else "O"
+            actions.extend([
+                {"action": "double", "physical_seat": winner, "cube_value": 2},
+                {"action": "drop", "physical_seat": loser},
+            ])
+        elif terminal_kind == "resignation":
+            target_cube = next(
+                (cube for cube in (4, 2, 1) if points % cube == 0 and 1 <= points // cube <= 3),
+                None,
+            )
+            if target_cube is None:
+                raise ValueError("resignation fixture result is not representable")
+            while cube_value < target_cube:
+                if cube_owner != "center" and cube_owner != current:
+                    actions.append({"action": "checker", "physical_seat": current})
+                    current = "X" if current == "O" else "O"
+                actions.extend([
+                    {"action": "double", "physical_seat": current, "cube_value": cube_value * 2},
+                    {"action": "take", "physical_seat": "X" if current == "O" else "O"},
+                ])
+                cube_value *= 2
+                cube_owner = "X" if current == "O" else "O"
+                if cube_value < target_cube:
+                    actions.append({"action": "checker", "physical_seat": current})
+                    current = "X" if current == "O" else "O"
+            while current != loser:
+                actions.append({"action": "checker", "physical_seat": current})
+                current = "X" if current == "O" else "O"
+        elif terminal_kind == "ordinary_game_over":
+            target_cube = next(
+                (cube for cube in (4, 2, 1) if points % cube == 0 and 1 <= points // cube <= 3),
+                None,
+            )
+            if target_cube is None:
+                raise ValueError("fixture result is not representable by a normal GNU game")
+            while cube_value < target_cube:
+                if cube_owner != "center" and cube_owner != current:
+                    actions.append({"action": "checker", "physical_seat": current})
+                    current = "X" if current == "O" else "O"
+                actions.extend([
+                    {"action": "double", "physical_seat": current, "cube_value": cube_value * 2},
+                    {"action": "take", "physical_seat": "X" if current == "O" else "O"},
+                ])
+                cube_value *= 2
+                cube_owner = "X" if current == "O" else "O"
+                if cube_value < target_cube or current != winner:
+                    actions.append({"action": "checker", "physical_seat": current})
+                    current = "X" if current == "O" else "O"
+            while current != winner:
+                actions.append({"action": "checker", "physical_seat": current})
+                current = "X" if current == "O" else "O"
+            actions.append({"action": "checker", "physical_seat": winner})
+        else:
+            raise ValueError("unsupported fixture terminal kind")
+
+        checker_indexes = {"O": 0, "X": 0}
+        for index, action in enumerate(actions):
+            if action["action"] != "checker":
+                continue
+            seat = action["physical_seat"]
+            if index == 0:
+                dice = [
+                    o_opening if opener == "O" else x_opening,
+                    x_opening if opener == "O" else o_opening,
+                ]
+            else:
+                checker_indexes[seat] += 1
+                row = dice_record(seed, 1, 7, game_number, seat, checker_indexes[seat])
+                dice = [row["die1"], row["die2"]]
+            action["dice"] = dice
+
+        checker_actions = {
+            seat: [action for action in actions if action["action"] == "checker" and action["physical_seat"] == seat]
+            for seat in ("O", "X")
+        }
+        if terminal_kind == "ordinary_game_over":
+            for seat, seat_actions in checker_actions.items():
+                terminal_seat = seat == winner
+                source = sum(action["dice"][0] for action in seat_actions) + (0 if terminal_seat else 1)
+                if not 1 <= source <= 24:
+                    raise ValueError("fixture checker path exceeds the board")
+                for action in seat_actions:
+                    die = action["dice"][0]
+                    destination = source - die
+                    action["moves"] = [[str(source), "off" if destination == 0 else str(destination)]]
+                    source = destination
+        else:
+            for action in actions:
+                if action["action"] != "checker":
+                    continue
+                die = action["dice"][0]
+                source = 8 if die == 1 else 13
+                action["moves"] = [[str(source), str(source - die)]]
+        return actions
+
     actions: list[dict[str, Any]] = [
         {"action": "checker", "physical_seat": winner, "dice": [3, 1], "moves": [["8", "5"], ["6", "5"]]},
         {"action": "checker", "physical_seat": loser, "dice": [4, 2], "moves": [["13", "9"], ["6", "4"]]},
@@ -67,33 +183,6 @@ def _game_actions(
         })
     elif terminal_kind not in {"drop", "resignation"}:
         raise ValueError("unsupported fixture terminal kind")
-    if seed is not None:
-        checker_indexes = {"O": 0, "X": 0}
-        opening_index = 1
-        while True:
-            o_opening = dice_record(seed, 1, 7, game_number, "O", opening_index)["opening_die"]
-            x_opening = dice_record(seed, 1, 7, game_number, "X", opening_index)["opening_die"]
-            if o_opening != x_opening:
-                break
-            opening_index += 1
-        opener = "O" if o_opening > x_opening else "X"
-        if actions[0]["physical_seat"] != opener:
-            # Rotate the ordinary fixture's actor pattern without changing the
-            # terminal winner.
-            actions[:0] = [
-                {"action": "checker", "physical_seat": opener, "moves": [["24", "21"], ["13", "11"]]},
-            ]
-        actions[0]["dice"] = [
-            o_opening if opener == "O" else x_opening,
-            x_opening if opener == "O" else o_opening,
-        ]
-        for action in actions[1:]:
-            if action["action"] != "checker":
-                continue
-            seat = action["physical_seat"]
-            checker_indexes[seat] += 1
-            row = dice_record(seed, 1, 7, game_number, seat, checker_indexes[seat])
-            action["dice"] = [row["die1"], row["die2"]]
     return actions
 
 
@@ -187,6 +276,125 @@ def native_documents(
     return sgf_document, text_document, summary
 
 
+def _set_bits(bits: list[int], start: int, width: int, value: int) -> None:
+    for offset in range(width):
+        bits[start + offset] = (value >> offset) & 1
+
+
+def _encode_fixture_gnuid(state: dict[str, Any]) -> str:
+    on_roll = state["on_roll"]
+    blocks = [state["players"]["X"], state["players"]["O"]] if on_roll == "O" else [
+        state["players"]["O"], state["players"]["X"]
+    ]
+    position_bits: list[int] = []
+    for board in blocks:
+        for count in [*board["points"], board["bar"]]:
+            position_bits.extend([1] * count)
+            position_bits.append(0)
+    position_bits.extend([0] * (80 - len(position_bits)))
+    position_bytes = bytes(
+        sum(position_bits[index * 8 + bit] << bit for bit in range(8))
+        for index in range(10)
+    )
+
+    bits = [0] * 72
+    _set_bits(bits, 0, 4, int(math.log2(state["cube_value"])))
+    _set_bits(bits, 4, 2, {"O": 0, "X": 1, "center": 3}[state["cube_owner"]])
+    _set_bits(bits, 6, 1, 0 if on_roll == "O" else 1)
+    _set_bits(bits, 7, 1, 0)
+    _set_bits(bits, 8, 3, {"setup": 0, "playing": 1, "game_over": 2, "resigned": 3}[state["game_state"]])
+    decision = state["decision"] or on_roll
+    _set_bits(bits, 11, 1, 0 if decision == "O" else 1)
+    pending = state["pending"]
+    _set_bits(bits, 12, 1, int(pending["type"] == "double"))
+    _set_bits(bits, 13, 2, pending.get("multiplier", 0) if pending["type"] == "resignation" else 0)
+    dice = state["dice"] or [0, 0]
+    _set_bits(bits, 15, 3, dice[0])
+    _set_bits(bits, 18, 3, dice[1])
+    _set_bits(bits, 21, 15, 7)
+    _set_bits(bits, 36, 15, state["score"][0])
+    _set_bits(bits, 51, 15, state["score"][1])
+    bits[66] = 1
+    match_bytes = bytes(
+        sum(bits[index * 8 + bit] << bit for bit in range(8))
+        for index in range(9)
+    )
+    return ":".join(
+        base64.b64encode(value).decode("ascii").rstrip("=")
+        for value in (position_bytes, match_bytes)
+    )
+
+
+def _standard_players() -> dict[str, dict[str, Any]]:
+    points = [0] * 24
+    for point, count in ((6, 5), (8, 3), (13, 5), (24, 2)):
+        points[point - 1] = count
+    return {
+        seat: {"points": list(points), "bar": 0, "off": 0}
+        for seat in ("O", "X")
+    }
+
+
+def _ordinary_fixture_players(
+    game: dict[str, Any], actions: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    winner = game["winner_physical_seat"]
+    loser = "X" if winner == "O" else "O"
+    cube = max(
+        [action.get("cube_value", 1) for action in actions if action["action"] == "double"],
+        default=1,
+    )
+    level = game["points"] // cube
+    first_source = {
+        seat: int(next(
+            action["moves"][0][0] for action in actions
+            if action["action"] == "checker" and action["physical_seat"] == seat
+        ))
+        for seat in ("O", "X")
+    }
+    players = {
+        seat: {"points": [0] * 24, "bar": 0, "off": 0}
+        for seat in ("O", "X")
+    }
+    players[winner]["points"][first_source[winner] - 1] = 1
+    players[winner]["off"] = 14
+    loser_off = 1 if level == 1 else 0
+    loser_bar = 1 if level == 3 else 0
+    players[loser]["off"] = loser_off
+    players[loser]["bar"] = loser_bar
+    players[loser]["points"][first_source[loser] - 1] += 1
+    players[loser]["points"][0] += 15 - loser_off - loser_bar - 1
+    return players
+
+
+def _apply_fixture_checker(state: dict[str, Any], seat: str, moves: list[list[str]]) -> None:
+    actor = state["players"][seat]
+    opponent = state["players"]["X" if seat == "O" else "O"]
+    for source, destination in moves:
+        actor["points"][int(source) - 1] -= 1
+        if destination == "off":
+            actor["off"] += 1
+            continue
+        target = int(destination)
+        opponent_index = 24 - target
+        if opponent["points"][opponent_index] == 1:
+            opponent["points"][opponent_index] = 0
+            opponent["bar"] += 1
+        actor["points"][target - 1] += 1
+
+
+def _next_opening_state(
+    game: dict[str, Any], score: list[int],
+) -> dict[str, Any]:
+    opening = game["opening_state"]
+    opener = opening["on_roll_physical_seat"]
+    return {
+        "players": _standard_players(), "on_roll": opener, "decision": opener,
+        "dice": list(opening["dice"]), "cube_value": 1, "cube_owner": "center",
+        "pending": {"type": "none"}, "score": list(score), "game_state": "playing",
+    }
+
+
 def write_complete_match(
     match: Path,
     engine_by_seat: dict[str, str],
@@ -201,137 +409,19 @@ def write_complete_match(
     match.mkdir(parents=True, exist_ok=True)
     native = match / "native"
     native.mkdir()
+    effective_terminal_kinds = terminal_kinds or ["ordinary_game_over"] * len(games)
+    if len(games) > 1:
+        # Multi-game fixtures exercise automatic next-game openings with legal
+        # starting boards; ordinary bearoff remains covered by the one-game fixture.
+        effective_terminal_kinds = [
+            "resignation" if kind == "ordinary_game_over" else kind
+            for kind in effective_terminal_kinds
+        ]
     sgf, text, summary = native_documents(
-        engine_by_seat, games, seed=seed, terminal_kinds=terminal_kinds,
+        engine_by_seat, games, seed=seed, terminal_kinds=effective_terminal_kinds,
     )
     (native / "match.sgf").write_text(sgf, encoding="utf-8")
     (native / "match.txt").write_text(text, encoding="utf-8")
-
-    decisions: list[dict[str, Any]] = []
-    for game in summary["games"]:
-        for action_index, action in enumerate(game["actions"], 1):
-            terminal = (
-                action_index == len(game["actions"])
-                and game["terminal"]["kind"] != "resignation"
-            )
-            seat = action["physical_seat"]
-            action_type = action["action"]
-            command = (
-                " ".join(f"{source}/{destination}" for source, destination in action["moves"])
-                if action_type == "checker"
-                else {"double": "double", "take": "take", "drop": "pass"}[action_type]
-            )
-            event = None
-            if terminal:
-                event = {
-                    "kind": game["terminal"]["kind"],
-                    "winner_physical_seat": game["winner_physical_seat"],
-                    "winner_engine": game["winner_engine"],
-                    "points": game["points"],
-                    "result_level": game["terminal"]["result_level"],
-                }
-                if event["kind"] == "drop":
-                    event.update({"loser_physical_seat": seat, "loser_engine": engine_by_seat[seat]})
-                elif event["kind"] == "resignation":
-                    event["resignation_level"] = game["terminal"]["result_level"]
-            ordinal = len(decisions) + 1
-            pre_gnuid = f"game-{game['game_number']}-record-{action_index}-pre"
-            post_gnuid = f"game-{game['game_number']}-record-{action_index}-post"
-            subsequent = None
-            if terminal and game["game_number"] < summary["game_count"]:
-                next_game = summary["games"][game["game_number"]]
-                post_gnuid = f"game-{game['game_number'] + 1}-opening"
-                subsequent = {
-                    "game_number": game["game_number"] + 1,
-                    "gnuid": post_gnuid,
-                    "score": game["post_score"],
-                    "on_roll_physical_seat": next_game["opening_state"]["on_roll_physical_seat"],
-                    "decision_physical_seat": next_game["opening_state"]["on_roll_physical_seat"],
-                    "dice": next_game["opening_state"]["dice"],
-                }
-            decisions.append({
-                "campaign_id": identity.campaign_id,
-                "pair_id": identity.pair_id,
-                "pair_index": identity.pair_index,
-                "pair_member": side,
-                "match_side": side,
-                "record_ordinal": ordinal,
-                "decision_ordinal": ordinal,
-                "game_number": game["game_number"],
-                "physical_seat": seat,
-                "engine": engine_by_seat[seat],
-                "gnuid": pre_gnuid,
-                "decision_type": "checker" if action_type == "checker" else "cube",
-                "analysis_dice": action["dice"] if action_type == "checker" else None,
-                "command": command,
-                "engine_kit_result": {"status": "fixture"},
-                "transition_evidence": {
-                    "command_type": "checker" if action_type == "checker" else command,
-                    "acting_physical_seat": seat,
-                    "acting_engine": engine_by_seat[seat],
-                    "pre_command": {"gnuid": pre_gnuid, "score": game["start_score"]},
-                    "terminal_event": event,
-                    "post_command": {
-                        "gnuid": post_gnuid,
-                        "score": game["post_score"] if terminal else game["start_score"],
-                    },
-                    "game_number": game["game_number"],
-                    "subsequent_opening_state": subsequent,
-                },
-            })
-        if game["terminal"]["kind"] == "resignation":
-            winner = game["winner_physical_seat"]
-            ordinal = len(decisions) + 1
-            pre_gnuid = f"game-{game['game_number']}-resignation-pre"
-            post_gnuid = f"game-{game['game_number']}-resignation-post"
-            subsequent = None
-            if game["game_number"] < summary["game_count"]:
-                next_game = summary["games"][game["game_number"]]
-                post_gnuid = f"game-{game['game_number'] + 1}-opening"
-                subsequent = {
-                    "game_number": game["game_number"] + 1,
-                    "gnuid": post_gnuid,
-                    "score": game["post_score"],
-                    "on_roll_physical_seat": next_game["opening_state"]["on_roll_physical_seat"],
-                    "decision_physical_seat": next_game["opening_state"]["on_roll_physical_seat"],
-                    "dice": next_game["opening_state"]["dice"],
-                }
-            decisions.append({
-                "campaign_id": identity.campaign_id,
-                "pair_id": identity.pair_id,
-                "pair_index": identity.pair_index,
-                "pair_member": side,
-                "match_side": side,
-                "record_ordinal": ordinal,
-                "decision_ordinal": ordinal,
-                "game_number": game["game_number"],
-                "physical_seat": winner,
-                "engine": engine_by_seat[winner],
-                "gnuid": pre_gnuid,
-                "decision_type": "board-rule",
-                "analysis_dice": None,
-                "command": "accept",
-                "engine_kit_result": {"status": "board-rule", "action": "accept-resignation"},
-                "transition_evidence": {
-                    "command_type": "accepted_resignation",
-                    "acting_physical_seat": winner,
-                    "acting_engine": engine_by_seat[winner],
-                    "pre_command": {"gnuid": pre_gnuid, "score": game["start_score"]},
-                    "terminal_event": _fixture_terminal_event(game, engine_by_seat),
-                    "post_command": {"gnuid": post_gnuid, "score": game["post_score"]},
-                    "game_number": game["game_number"],
-                    "subsequent_opening_state": subsequent,
-                },
-            })
-    for index in range(1, len(decisions)):
-        opening = decisions[index - 1]["transition_evidence"]["subsequent_opening_state"]
-        if opening is not None:
-            decisions[index]["gnuid"] = opening["gnuid"]
-            decisions[index]["transition_evidence"]["pre_command"]["gnuid"] = opening["gnuid"]
-    (match / "decisions.jsonl").write_text(
-        "".join(json.dumps(record, sort_keys=True) + "\n" for record in decisions),
-        encoding="utf-8",
-    )
 
     dice = match / "dice"
     dice.mkdir()
@@ -367,6 +457,171 @@ def write_complete_match(
     consumption = dice / "seat_dice_consumption.jsonl"
     consumption.write_text(
         "".join(json.dumps(record, sort_keys=True) + "\n" for record in consumption_records),
+        encoding="utf-8",
+    )
+
+    decisions: list[dict[str, Any]] = []
+
+    def append_decision(
+        game: dict[str, Any], seat: str, decision_type: str, command: str,
+        command_type: str, pre_state: dict[str, Any], post_state: dict[str, Any],
+        *, analysis_dice: list[int] | None = None,
+        event: dict[str, Any] | None = None,
+        subsequent: dict[str, Any] | None = None,
+    ) -> None:
+        ordinal = len(decisions) + 1
+        pre_gnuid = _encode_fixture_gnuid(pre_state)
+        post_gnuid = _encode_fixture_gnuid(post_state)
+        decisions.append({
+            "campaign_id": identity.campaign_id, "pair_id": identity.pair_id,
+            "pair_index": identity.pair_index, "pair_member": side, "match_side": side,
+            "record_ordinal": ordinal, "decision_ordinal": ordinal,
+            "game_number": game["game_number"], "physical_seat": seat,
+            "engine": engine_by_seat[seat], "gnuid": pre_gnuid,
+            "decision_type": decision_type, "analysis_dice": analysis_dice,
+            "command": command,
+            "engine_kit_result": (
+                {"status": "board-rule", "action": "accept-resignation"}
+                if decision_type == "board-rule" else {"status": "fixture"}
+            ),
+            "transition_evidence": {
+                "command_type": command_type, "acting_physical_seat": seat,
+                "acting_engine": engine_by_seat[seat],
+                "pre_command": {"gnuid": pre_gnuid, "score": list(pre_state["score"])},
+                "terminal_event": event,
+                "post_command": {"gnuid": post_gnuid, "score": list(post_state["score"])},
+                "game_number": game["game_number"],
+                "subsequent_opening_state": subsequent,
+            },
+        })
+
+    current: dict[str, Any] | None = None
+    for game in summary["games"]:
+        actions = game["actions"]
+        if current is None:
+            opening = game["opening_state"]
+            opener = opening["on_roll_physical_seat"]
+            players = (
+                _ordinary_fixture_players(game, actions)
+                if game["terminal"]["kind"] == "ordinary_game_over"
+                else _standard_players()
+            )
+            current = {
+                "players": players, "on_roll": opener, "decision": opener,
+                "dice": list(opening["dice"]), "cube_value": 1, "cube_owner": "center",
+                "pending": {"type": "none"}, "score": list(game["start_score"]),
+                "game_state": "playing",
+            }
+        for action_index, action in enumerate(actions):
+            seat = action["physical_seat"]
+            action_type = action["action"]
+            if action_type == "checker" and action_index > 0:
+                rolled = copy.deepcopy(current)
+                rolled["dice"] = list(action["dice"])
+                append_decision(game, seat, "cube", "roll", "roll", current, rolled)
+                current = rolled
+            before = copy.deepcopy(current)
+            terminal = (
+                action_index == len(actions) - 1
+                and game["terminal"]["kind"] != "resignation"
+            )
+            event = _fixture_terminal_event(game, engine_by_seat) if terminal else None
+            subsequent = None
+            if action_type == "checker":
+                _apply_fixture_checker(current, seat, action["moves"])
+                command = " ".join(f"{source}/{destination}" for source, destination in action["moves"])
+                command_type = "checker"
+                decision_type = "checker"
+                analysis_dice = list(action["dice"])
+                if not terminal:
+                    current["on_roll"] = "X" if seat == "O" else "O"
+                    current["decision"] = current["on_roll"]
+                    current["dice"] = None
+            elif action_type == "double":
+                responder = "X" if seat == "O" else "O"
+                current["pending"] = {"type": "double", "offerer": seat, "responder": responder}
+                current["decision"] = responder
+                command = command_type = "double"
+                decision_type, analysis_dice = "cube", None
+            elif action_type == "take":
+                offerer = current["pending"]["offerer"]
+                current["cube_value"] *= 2
+                current["cube_owner"] = seat
+                current["pending"] = {"type": "none"}
+                current["on_roll"] = offerer
+                current["decision"] = offerer
+                current["dice"] = None
+                command = command_type = "take"
+                decision_type, analysis_dice = "cube", None
+            elif action_type == "drop":
+                command, command_type, decision_type, analysis_dice = "pass", "pass", "cube", None
+            else:
+                raise ValueError("unsupported connected fixture action")
+
+            if terminal:
+                current["score"] = list(game["post_score"])
+                if game["game_number"] < summary["game_count"]:
+                    next_game = summary["games"][game["game_number"]]
+                    current = _next_opening_state(next_game, current["score"])
+                    post_gnuid = _encode_fixture_gnuid(current)
+                    subsequent = {
+                        "game_number": game["game_number"] + 1, "gnuid": post_gnuid,
+                        "score": list(current["score"]),
+                        "on_roll_physical_seat": current["on_roll"],
+                        "decision_physical_seat": current["decision"],
+                        "dice": list(current["dice"]),
+                    }
+                else:
+                    current["game_state"] = "game_over"
+                    current["decision"] = None
+                    current["dice"] = None
+                    current["pending"] = {"type": "none"}
+            append_decision(
+                game, seat, decision_type, command, command_type, before, current,
+                analysis_dice=analysis_dice, event=event, subsequent=subsequent,
+            )
+
+        if game["terminal"]["kind"] == "resignation":
+            offerer = current["on_roll"]
+            winner = game["winner_physical_seat"]
+            if offerer == winner:
+                raise ValueError("connected resignation fixture has the wrong offerer")
+            offered = copy.deepcopy(current)
+            offered["pending"] = {
+                "type": "resignation", "offerer": offerer, "responder": winner,
+                "multiplier": game["terminal"]["result_level"],
+            }
+            offered["decision"] = winner
+            decisions[-1]["transition_evidence"]["automatic_transition"] = {
+                "type": "resignation_offer",
+                "from_gnuid": _encode_fixture_gnuid(current),
+                "to_gnuid": _encode_fixture_gnuid(offered),
+            }
+            before = copy.deepcopy(offered)
+            current = copy.deepcopy(offered)
+            current["score"] = list(game["post_score"])
+            subsequent = None
+            if game["game_number"] < summary["game_count"]:
+                next_game = summary["games"][game["game_number"]]
+                current = _next_opening_state(next_game, current["score"])
+                subsequent = {
+                    "game_number": game["game_number"] + 1,
+                    "gnuid": _encode_fixture_gnuid(current), "score": list(current["score"]),
+                    "on_roll_physical_seat": current["on_roll"],
+                    "decision_physical_seat": current["decision"], "dice": list(current["dice"]),
+                }
+            else:
+                current["game_state"] = "resigned"
+                current["decision"] = None
+                current["dice"] = None
+                current["pending"] = {"type": "none"}
+            append_decision(
+                game, winner, "board-rule", "accept", "accepted_resignation", before, current,
+                event=_fixture_terminal_event(game, engine_by_seat), subsequent=subsequent,
+            )
+
+    (match / "decisions.jsonl").write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in decisions),
         encoding="utf-8",
     )
     write_json(dice / "seat_dice_manifest.json", {

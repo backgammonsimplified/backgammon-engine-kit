@@ -239,6 +239,8 @@ def test_publish_pair_rejects_terminal_and_ordered_journal_corruption(
     if case in {"resignation-encoded-as-normal", "wrong-resignation-level"}:
         games = [("O", 2), ("O", 6)]
         terminal_kinds = ["resignation", "ordinary_game_over"]
+    elif case == "normal-encoded-as-resignation":
+        games = [("O", 8)]
     elif case == "pass-encoded-as-resignation":
         games = [("O", 1), ("O", 6)]
         terminal_kinds = ["drop", "ordinary_game_over"]
@@ -266,7 +268,7 @@ def test_publish_pair_rejects_terminal_and_ordered_journal_corruption(
     elif case == "wrong-resignation-level":
         terminal["terminal_event"]["resignation_level"] = 3
     elif case == "wrong-command-type":
-        terminal["command_type"] = "accepted_resignation"
+        terminal["command_type"] = "unsupported"
     elif case == "wrong-acting-seat":
         terminal["acting_physical_seat"] = "X" if terminal["acting_physical_seat"] == "O" else "O"
     elif case == "wrong-acting-engine":
@@ -331,6 +333,96 @@ def test_publish_pair_rejects_terminal_and_ordered_journal_corruption(
             {"attempt_count": 1, "transitions": []},
         )
     assert not (artifact_root / config.campaign_id / "pairs" / identity.pair_id).exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "disconnected-adjacent-gnuids",
+        "swapped-with-rewritten-ordinals",
+        "fabricated-plausible-gnuid",
+        "missing-roll",
+        "extra-roll",
+        "roll-at-wrong-point",
+        "wrong-checker-state",
+        "wrong-cube-state",
+        "wrong-terminal-state",
+        "wrong-automatic-opening",
+        "wrong-seat",
+        "wrong-engine",
+    ],
+)
+def test_publication_requires_exact_connected_decision_state_machine(
+    tmp_path: Path, case: str,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    execution = tmp_path / "execution"
+    games = [("O", 2), ("O", 6)] if case == "wrong-automatic-opening" else None
+    write_execution_fixture(execution, identity, games)
+    match = execution / "matches/A"
+    decision_path = match / "decisions.jsonl"
+    decisions = [json.loads(line) for line in decision_path.read_text(encoding="utf-8").splitlines()]
+    rolls = [index for index, record in enumerate(decisions) if record["command"] == "roll"]
+    checkers = [
+        index for index, record in enumerate(decisions)
+        if record["transition_evidence"]["command_type"] == "checker"
+    ]
+    doubles = [index for index, record in enumerate(decisions) if record["command"] == "double"]
+    terminal_index = next(
+        index for index, record in enumerate(decisions)
+        if record["transition_evidence"]["terminal_event"] is not None
+    )
+
+    if case == "disconnected-adjacent-gnuids":
+        replacement = decisions[-1]["transition_evidence"]["post_command"]["gnuid"]
+        decisions[1]["gnuid"] = replacement
+        decisions[1]["transition_evidence"]["pre_command"]["gnuid"] = replacement
+    elif case == "swapped-with-rewritten-ordinals":
+        decisions[1], decisions[2] = decisions[2], decisions[1]
+    elif case == "fabricated-plausible-gnuid":
+        decisions[0]["transition_evidence"]["post_command"]["gnuid"] = decisions[4]["gnuid"]
+    elif case == "missing-roll":
+        del decisions[rolls[0]]
+    elif case == "extra-roll":
+        decisions.insert(rolls[0] + 1, dict(decisions[rolls[0]]))
+    elif case == "roll-at-wrong-point":
+        index = rolls[0]
+        decisions[index], decisions[index + 1] = decisions[index + 1], decisions[index]
+    elif case == "wrong-checker-state":
+        decisions[checkers[1]]["transition_evidence"]["post_command"]["gnuid"] = decisions[-1]["gnuid"]
+    elif case == "wrong-cube-state":
+        decisions[doubles[0]]["transition_evidence"]["post_command"]["gnuid"] = decisions[doubles[0]]["gnuid"]
+    elif case == "wrong-terminal-state":
+        decisions[terminal_index]["transition_evidence"]["post_command"]["gnuid"] = decisions[terminal_index]["gnuid"]
+    elif case == "wrong-automatic-opening":
+        transition = decisions[terminal_index]["transition_evidence"]
+        wrong = decisions[terminal_index]["gnuid"]
+        transition["post_command"]["gnuid"] = wrong
+        transition["subsequent_opening_state"]["gnuid"] = wrong
+    elif case == "wrong-seat":
+        decisions[checkers[0]]["physical_seat"] = (
+            "X" if decisions[checkers[0]]["physical_seat"] == "O" else "O"
+        )
+    elif case == "wrong-engine":
+        decisions[checkers[0]]["engine"] = (
+            "gnu" if decisions[checkers[0]]["engine"] == "sage" else "sage"
+        )
+    for ordinal, record in enumerate(decisions, 1):
+        record["record_ordinal"] = ordinal
+        record["decision_ordinal"] = ordinal
+    decision_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in decisions),
+        encoding="utf-8",
+    )
+
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    with pytest.raises(MatchExecutionError):
+        publish_pair(
+            execution, artifact_root, config, identity, publication_common(),
+            {"attempt_count": 1, "transitions": []},
+        )
 
 
 @pytest.mark.parametrize(
@@ -405,7 +497,7 @@ def test_publication_rejects_incomplete_or_cross_format_native_game_evidence(
         sgf_path.write_text(trees[0] + trees[1] + trees[1] + trees[2], encoding="utf-8")
     elif case == "sgf-text-result-mismatch":
         sgf_path.write_text(
-            sgf_path.read_text(encoding="utf-8").replace("RE[W+6]", "RE[W+5]"),
+            sgf_path.read_text(encoding="utf-8").replace("RE[W+6R]", "RE[W+5R]"),
             encoding="utf-8",
         )
     elif case == "sgf-text-score-progression-mismatch":
@@ -459,11 +551,11 @@ def test_publication_rejects_incomplete_or_cross_format_native_game_evidence(
     elif case == "same-result-different-cube-action":
         text_path.write_text(text.replace("Doubles => 2                Takes", "Doubles => 2                Drops", 1), encoding="utf-8")
     elif case == "same-result-different-terminal-action":
-        changed, count = re.subn(
-            r"[1-6]{2}: [^\n]+(?=\n\s+Wins 2 points)", "Drops", text, count=1
+        checker = re.search(r"[1-6]{2}: \d+/\d+", text)
+        assert checker is not None
+        text_path.write_text(
+            text[:checker.start()] + "Drops" + text[checker.end():], encoding="utf-8"
         )
-        assert count == 1
-        text_path.write_text(changed, encoding="utf-8")
     elif case == "root-only-sgf-with-result":
         trees = sgf_path.read_text(encoding="utf-8").splitlines(keepends=True)
         trees[0] = re.sub(r";[WB]\[[^\n]*", ")\n", trees[0], count=1)
@@ -478,16 +570,16 @@ def test_publication_rejects_incomplete_or_cross_format_native_game_evidence(
         swapped = row.group(1) + f"{row.group(3):<27} " + row.group(2).strip()
         text_path.write_text(text[:row.start()] + swapped + text[row.end():], encoding="utf-8")
     elif case == "missing-move":
-        move = re.search(r"([1-6]{2}: \d+/\d+) \d+/\d+", text)
+        move = re.search(r"[1-6]{2}: \d+/\d+", text)
         assert move is not None
-        text_path.write_text(text[:move.start()] + move.group(1) + text[move.end():], encoding="utf-8")
+        text_path.write_text(text[:move.start()] + text[move.end():], encoding="utf-8")
     elif case == "extra-move":
-        move = re.search(r"[1-6]{2}: \d+/\d+ \d+/\d+", text)
+        move = re.search(r"[1-6]{2}: \d+/\d+", text)
         assert move is not None
         text_path.write_text(text[:move.end()] + " 13/10" + text[move.end():], encoding="utf-8")
     elif case == "action-belongs-to-wrong-game":
-        game_two_action = re.search(r"[1-6]{2}: \d+/\d+ \d+/\d+", text[game_2:])
-        game_one_action = re.search(r"[1-6]{2}: \d+/\d+ \d+/\d+", text)
+        game_two_action = re.search(r"[1-6]{2}: \d+/\d+", text[game_2:])
+        game_one_action = re.search(r"[1-6]{2}: \d+/\d+", text)
         assert game_two_action is not None and game_one_action is not None
         transplanted = game_two_action.group(0)
         text_path.write_text(

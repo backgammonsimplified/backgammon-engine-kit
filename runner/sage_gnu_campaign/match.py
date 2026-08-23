@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import errno
+import base64
+import binascii
 import json
 import math
 import os
@@ -13,6 +15,7 @@ import subprocess
 import termios
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from .config import CampaignConfig
@@ -63,6 +66,8 @@ TEXT_ACTION_RE = re.compile(
 )
 SGF_RESULT_RE = re.compile(r"^([WB])\+(\d+)(R(?:esign)?)?$", re.IGNORECASE)
 GNU_RUNTIME_VERSION_RE = re.compile(r"^(\d+\.\d+\.\d+) (\d{8})$")
+GNU_POSITION_ID_RE = re.compile(r"^[A-Za-z0-9+/]{14}$")
+GNU_MATCH_ID_RE = re.compile(r"^[A-Za-z0-9+/]{12}$")
 NO_RETURNED_RESULT = object()
 
 
@@ -77,6 +82,131 @@ def _frozen_gnu_sgf_application(config: CampaignConfig) -> str:
     if match is None:
         raise MatchExecutionError("frozen GNU runtime version identity is missing or malformed")
     return f"GNU Backgammon:{match.group(1)}"
+
+
+def _decode_gnu_id_component(
+    value: str, pattern: re.Pattern[str], expected_bytes: int, label: str,
+) -> bytes:
+    if pattern.fullmatch(value) is None:
+        raise MatchExecutionError(f"publication {label} has invalid Base64 spelling")
+    try:
+        decoded = base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise MatchExecutionError(f"publication {label} is invalid Base64") from exc
+    if len(decoded) != expected_bytes:
+        raise MatchExecutionError(f"publication {label} has invalid decoded length")
+    return decoded
+
+
+def _little_endian_bits(data: bytes) -> tuple[int, ...]:
+    return tuple((byte >> bit) & 1 for byte in data for bit in range(8))
+
+
+def _bit_value(bits: tuple[int, ...], start: int, width: int) -> int:
+    return sum(bits[start + offset] << offset for offset in range(width))
+
+
+def _decode_publication_gnuid(value: str) -> Any:
+    """Strictly decode the state fields used by live command-transition policy."""
+    if not isinstance(value, str) or value.count(":") != 1:
+        raise MatchExecutionError("publication GNUID must contain one Position ID and Match ID")
+    position_id, match_id = value.split(":", 1)
+    position_bits = _little_endian_bits(
+        _decode_gnu_id_component(position_id, GNU_POSITION_ID_RE, 10, "Position ID")
+    )
+    cursor = 0
+    blocks: list[list[int]] = []
+    for _player_index in range(2):
+        points: list[int] = []
+        for _point_index in range(25):
+            count = 0
+            while cursor < len(position_bits) and position_bits[cursor] == 1:
+                count += 1
+                cursor += 1
+            if cursor >= len(position_bits):
+                raise MatchExecutionError("publication Position ID ends inside a checker count")
+            cursor += 1
+            points.append(count)
+        if sum(points) > 15:
+            raise MatchExecutionError("publication Position ID exceeds fifteen checkers")
+        blocks.append(points)
+    if any(position_bits[cursor:]):
+        raise MatchExecutionError("publication Position ID has noncanonical padding")
+
+    bits = _little_endian_bits(
+        _decode_gnu_id_component(match_id, GNU_MATCH_ID_RE, 9, "Match ID")
+    )
+    cube_exp = _bit_value(bits, 0, 4)
+    cube_owner_code = _bit_value(bits, 4, 2)
+    on_roll_index = _bit_value(bits, 6, 1)
+    game_state_code = _bit_value(bits, 8, 3)
+    decision_index = _bit_value(bits, 11, 1)
+    doubled = bool(_bit_value(bits, 12, 1))
+    resignation = _bit_value(bits, 13, 2)
+    die1 = _bit_value(bits, 15, 3)
+    die2 = _bit_value(bits, 18, 3)
+    match_length = _bit_value(bits, 21, 15)
+    score0 = _bit_value(bits, 36, 15)
+    score1 = _bit_value(bits, 51, 15)
+    if tuple(bits[66:]) != (1, 0, 0, 0, 0, 0):
+        raise MatchExecutionError("publication Match ID has noncanonical framing")
+    if cube_owner_code == 2 or cube_exp > 10:
+        raise MatchExecutionError("publication Match ID has invalid cube state")
+    if (die1 == 0) != (die2 == 0) or die1 > 6 or die2 > 6:
+        raise MatchExecutionError("publication Match ID has invalid dice")
+    if doubled and resignation:
+        raise MatchExecutionError("publication Match ID has conflicting pending actions")
+    game_state = {0: "setup", 1: "playing", 2: "game_over", 3: "resigned", 4: "game_over"}.get(
+        game_state_code
+    )
+    if game_state is None:
+        raise MatchExecutionError("publication Match ID has an unsupported game state")
+
+    on_roll = f"player_{on_roll_index}"
+    decision_player: str | None = f"player_{decision_index}"
+    first, second = blocks
+    encoded_by_player = (second, first) if on_roll_index == 0 else (first, second)
+
+    def player_board(encoded: list[int]) -> Any:
+        represented = sum(encoded)
+        return SimpleNamespace(points=tuple(encoded[:24]), bar=encoded[24], off=15 - represented)
+
+    pending = SimpleNamespace(
+        type="none", offerer=None, responder=None,
+        offered_cube_value=None, resignation_multiplier=None,
+    )
+    cube_value = 2 ** cube_exp
+    if doubled:
+        pending = SimpleNamespace(
+            type="double",
+            offerer=f"player_{1 - decision_index}", responder=f"player_{decision_index}",
+            offered_cube_value=cube_value * 2, resignation_multiplier=None,
+        )
+    elif resignation:
+        pending = SimpleNamespace(
+            type="resignation",
+            offerer=f"player_{1 - decision_index}", responder=f"player_{decision_index}",
+            offered_cube_value=None, resignation_multiplier=resignation,
+        )
+    if game_state != "playing":
+        decision_player = None
+    board0, board1 = (player_board(encoded_by_player[0]), player_board(encoded_by_player[1]))
+    return SimpleNamespace(
+        board=SimpleNamespace(
+            checker_count=SimpleNamespace(player_0=15, player_1=15),
+            player_0=board0, player_1=board1,
+        ),
+        state=SimpleNamespace(
+            game_state=game_state, on_roll=on_roll, decision_player=decision_player,
+            dice=None if die1 == 0 else (die1, die2),
+        ),
+        cube=SimpleNamespace(
+            value=cube_value,
+            owner={0: "player_0", 1: "player_1", 3: "center"}[cube_owner_code],
+            pending_action=pending,
+        ),
+        score=SimpleNamespace(player_0=score0, player_1=score1, match_length=match_length),
+    )
 
 
 def _parse_terminal_event(output: str) -> dict[str, Any] | None:
@@ -865,9 +995,46 @@ def _expected_terminal_event(
     return event
 
 
+def _validate_automatic_publication_transition(
+    evidence: Any, from_gnuid: str, following_gnuid: str,
+) -> None:
+    if not isinstance(evidence, dict) or set(evidence) != {"type", "from_gnuid", "to_gnuid"}:
+        raise MatchExecutionError("automatic publication transition evidence is malformed")
+    if (
+        evidence["type"] != "resignation_offer"
+        or evidence["from_gnuid"] != from_gnuid
+        or evidence["to_gnuid"] != following_gnuid
+    ):
+        raise MatchExecutionError("automatic publication transition identity is invalid")
+    before = _decode_publication_gnuid(from_gnuid)
+    after = _decode_publication_gnuid(following_gnuid)
+    before_pending = before.cube.pending_action
+    after_pending = after.cube.pending_action
+    if (
+        _board_snapshot(before) != _board_snapshot(after)
+        or _score_snapshot(before) != _score_snapshot(after)
+        or before.cube.value != after.cube.value
+        or before.cube.owner != after.cube.owner
+        or before.state.game_state != "playing"
+        or after.state.game_state != "playing"
+        or before.state.dice is not None
+        or after.state.dice is not None
+        or before.state.on_roll != after.state.on_roll
+        or before.state.decision_player != before.state.on_roll
+        or before_pending.type != "none"
+        or after_pending.type != "resignation"
+        or after_pending.offerer != before.state.on_roll
+        or after_pending.responder == before.state.on_roll
+        or after.state.decision_player != after_pending.responder
+        or after_pending.resignation_multiplier not in {1, 2, 3}
+    ):
+        raise MatchExecutionError("automatic resignation transition changes unrelated GNU state")
+
+
 def _validate_publication_decisions(
     summary: Mapping[str, Any],
     decisions: list[dict[str, Any]],
+    consumption: list[dict[str, Any]],
     expected_engine_by_seat: Mapping[str, str],
     identity: PairIdentity,
     match_side: str,
@@ -886,6 +1053,22 @@ def _validate_publication_decisions(
         game["game_number"]: [] for game in summary["games"]
     }
     terminals: dict[int, list[int]] = {number: [] for number in journal_actions}
+    opening_records = {
+        number: [
+            record for record in consumption
+            if record.get("game_number") == number and record.get("prompt_type") == "opening"
+        ]
+        for number in journal_actions
+    }
+    checker_records = {
+        number: [
+            record for record in consumption
+            if record.get("game_number") == number and record.get("prompt_type") == "checker"
+        ]
+        for number in journal_actions
+    }
+    checker_offsets = {number: 0 for number in journal_actions}
+    connected_gnuid: str | None = None
     for index, record in enumerate(decisions, 1):
         game_number = record.get("game_number")
         seat = record.get("physical_seat")
@@ -929,6 +1112,13 @@ def _validate_publication_decisions(
             or post["gnuid"] == pre["gnuid"]
         ):
             raise MatchExecutionError("decision transition command, actor, or pre/post state is invalid")
+        if connected_gnuid is not None and pre["gnuid"] != connected_gnuid:
+            raise MatchExecutionError("decision journal GNUIDs do not form one connected state history")
+        try:
+            pre_position = _decode_publication_gnuid(pre["gnuid"])
+            post_position = _decode_publication_gnuid(post["gnuid"])
+        except MatchExecutionError as exc:
+            raise MatchExecutionError("decision journal contains an invalid publication GNUID") from exc
         event = transition.get("terminal_event")
         subsequent = transition.get("subsequent_opening_state")
         if event is None:
@@ -979,6 +1169,51 @@ def _validate_publication_decisions(
                 ):
                     raise MatchExecutionError("subsequent opening is reordered or belongs to the wrong game")
 
+        consumed: list[dict[str, Any]] = []
+        if event is not None and game_number < summary["game_count"]:
+            consumed = opening_records[game_number + 1]
+        elif command_type == "roll" or (
+            command_type in {"checker", "take"} and post_position.state.dice is not None
+        ):
+            offset = checker_offsets[game_number]
+            available = checker_records[game_number]
+            if offset >= len(available):
+                raise MatchExecutionError("decision command lacks its deterministic checker roll")
+            consumed = [available[offset]]
+            checker_offsets[game_number] += 1
+        if event is not None and game_number < summary["game_count"]:
+            final_opening = consumed[-2:]
+            opener = "O" if final_opening[0]["die1"] > final_opening[1]["die1"] else "X"
+            expected_next_roll_seat = _opposite_seat(opener)
+        elif command_type == "roll":
+            expected_next_roll_seat = _opposite_seat(seat)
+        elif command_type == "double":
+            expected_next_roll_seat = seat
+        elif consumed and consumed[0].get("prompt_type") == "checker":
+            expected_next_roll_seat = _opposite_seat(consumed[0]["physical_seat"])
+        else:
+            expected_next_roll_seat = (
+                _seat(post_position.state.on_roll)
+                if post_position.state.on_roll is not None else None
+            )
+        _validate_command_transition(
+            str(command), pre_position, post_position, consumed, game_number, seat,
+            expected_engine_by_seat[seat], expected_engine_by_seat,
+            expected_next_roll_seat, event,
+        )
+
+        automatic = transition.get("automatic_transition")
+        if automatic is None:
+            connected_gnuid = post["gnuid"]
+        else:
+            if index >= len(decisions):
+                raise MatchExecutionError("automatic transition has no following decision")
+            following_gnuid = decisions[index].get("gnuid")
+            _validate_automatic_publication_transition(
+                automatic, post["gnuid"], following_gnuid
+            )
+            connected_gnuid = following_gnuid
+
         if command_type == "checker":
             try:
                 moves = _parse_text_moves(str(command))
@@ -1012,6 +1247,8 @@ def _validate_publication_decisions(
 
     if observed_games != sorted(observed_games):
         raise MatchExecutionError("decision journal game records are reordered")
+    if any(checker_offsets[number] != len(checker_records[number]) for number in checker_records):
+        raise MatchExecutionError("deterministic checker rolls do not map exactly to decisions")
     for game in summary["games"]:
         number = game["game_number"]
         if len(terminals[number]) != 1:
@@ -1189,12 +1426,12 @@ def _validate_publication_journals(
         or manifest.get("namespace_seed") != namespace_seed(identity.base_seed, match_side)
     ):
         raise MatchExecutionError("match manifest conflicts with publication pair/side authority")
-    _validate_publication_decisions(
-        summary, decisions, expected_engine_by_seat, identity, match_side
-    )
     _validate_publication_dice(
         match_root, summary, dice_manifest, consumption, expected_engine_by_seat,
         identity, match_side, roll_count, files_per_match,
+    )
+    _validate_publication_decisions(
+        summary, decisions, consumption, expected_engine_by_seat, identity, match_side
     )
 
 

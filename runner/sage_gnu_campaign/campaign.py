@@ -488,6 +488,8 @@ def _preserve_campaign_interrupt(
 ) -> None:
     """Persist interruption evidence while never replacing the operator interrupt."""
     marker_hash: str | None = None
+    pair_durable = False
+    ledger_durable = False
     if destination.exists():
         try:
             marker_hash = verify_committed_pair(
@@ -504,30 +506,78 @@ def _preserve_campaign_interrupt(
             )
     if marker_hash is not None:
         try:
-            entry = ledger.load()["pairs"][identity.pair_id]
-            if entry["state"] in {"started", "failed"}:
-                ledger.transition(
-                    identity.pair_id,
-                    "committed",
-                    reason="reconcile-verified-publication-after-interrupt",
-                    committed_marker_sha256=marker_hash,
-                )
-            elif (
-                entry["state"] != "committed"
-                or entry.get("committed_marker_sha256") != marker_hash
-            ):
-                raise CampaignError("ledger conflicts with verified publication after interrupt")
-        except BaseException as ledger_exc:
+            # A visible final rename may have been interrupted before its parent
+            # directory entry reached stable storage. Repeating this barrier is
+            # required before the ledger may describe the pair as committed.
+            fsync_directory(destination.parent)
+            pair_durable = True
+        except BaseException as durability_exc:
             exc.add_note(
-                "ledger reconciliation during interrupt handling also failed: "
-                f"{type(ledger_exc).__name__}: {ledger_exc}"
+                "published-pair durability completion during interrupt handling also failed: "
+                f"{type(durability_exc).__name__}: {durability_exc}"
             )
+    if marker_hash is not None:
+        if not pair_durable:
+            exc.add_note(
+                "ledger reconciliation was not attempted because published-pair durability is uncertain"
+            )
+        else:
+            try:
+                ledger_data = ledger.load()
+                ledger.assert_authority(
+                    ledger_data,
+                    config,
+                    report["benchmarker"]["commit"],
+                    report["engine_kit"]["source_commit"],
+                )
+                entry = ledger_data["pairs"][identity.pair_id]
+                if entry["state"] in {"started", "failed"}:
+                    ledger.transition(
+                        identity.pair_id,
+                        "committed",
+                        reason="reconcile-verified-publication-after-interrupt",
+                        committed_marker_sha256=marker_hash,
+                    )
+                elif (
+                    entry["state"] != "committed"
+                    or entry.get("committed_marker_sha256") != marker_hash
+                ):
+                    raise CampaignError("ledger conflicts with verified publication after interrupt")
+                reconciled = ledger.load()
+                ledger.assert_authority(
+                    reconciled,
+                    config,
+                    report["benchmarker"]["commit"],
+                    report["engine_kit"]["source_commit"],
+                )
+                reconciled_entry = reconciled["pairs"][identity.pair_id]
+                if (
+                    reconciled_entry.get("state") != "committed"
+                    or reconciled_entry.get("committed_marker_sha256") != marker_hash
+                ):
+                    raise CampaignError("ledger reconciliation did not persist committed authority")
+                # The replacement may already be visible because the interrupt
+                # occurred inside _write_atomic after os.replace. Its parent must
+                # still be flushed even when no new transition was necessary.
+                fsync_directory(ledger.path.parent)
+                ledger_durable = True
+            except BaseException as ledger_exc:
+                exc.add_note(
+                    "ledger durability reconciliation during interrupt handling also failed: "
+                    f"{type(ledger_exc).__name__}: {ledger_exc}"
+                )
     failure = _persist_attempt_failure_preserving_primary(
         root, identity, attempt, workspace, exc, private_roots
     )
     action = {
         "pair_id": identity.pair_id,
-        "action": "committed-interrupted" if marker_hash is not None else "interrupted-incomplete",
+        "action": (
+            "committed-interrupted" if ledger_durable
+            else "published-ledger-pending-interrupted" if marker_hash is not None
+            else "interrupted-incomplete"
+        ),
+        "pair_directory_durable": pair_durable,
+        "ledger_transition_durable": ledger_durable,
         "phase": phase,
         "attempt": attempt,
         "marker_sha256": marker_hash,

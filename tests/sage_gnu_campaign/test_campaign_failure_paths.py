@@ -10,6 +10,7 @@ import pytest
 
 from runner.sage_gnu_campaign import campaign as campaign_module
 from runner.sage_gnu_campaign import cli as cli_module
+from runner.sage_gnu_campaign import ledger as ledger_module
 from runner.sage_gnu_campaign.campaign import campaign_root, publish_pair, run_campaign
 from runner.sage_gnu_campaign.config import load_campaign_config
 from runner.sage_gnu_campaign.identity import pair_identity
@@ -446,6 +447,142 @@ def test_interrupt_persistence_failure_never_replaces_keyboard_interrupt(
     run = json.loads(run_path.read_text())
     assert run["state"] == "interrupted"
     assert run["pair_actions"][-1]["failure"]["status"] == "persistence-failed"
+
+
+@pytest.mark.parametrize("retry_fails", [False, True], ids=["retry-succeeds", "retry-fails"])
+def test_interrupt_recovery_completes_pair_parent_before_ledger_reconciliation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry_fails: bool,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    monkeypatch.setattr(campaign_module, "preflight", lambda *a, **k: report(config))
+    monkeypatch.setattr(campaign_module, "EngineKitSession", lambda _: object())
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    root = campaign_root(artifacts, config)
+    pairs = root / "pairs"
+    destination = pairs / identity.pair_id
+    primary = KeyboardInterrupt("interrupt after final pair rename")
+    events: list[str] = []
+    pair_parent_calls = 0
+    real_fsync_directory = campaign_module.fsync_directory
+    real_transition = CampaignLedger.transition
+
+    def pair_parent_barrier(path: Path) -> None:
+        nonlocal pair_parent_calls
+        target = Path(path)
+        if target == pairs and destination.exists():
+            pair_parent_calls += 1
+            if pair_parent_calls == 1:
+                events.append("pair-parent-original-interrupt")
+                raise primary
+            events.append("pair-parent-recovery")
+            if retry_fails:
+                raise OSError("secondary pair-parent durability failure")
+        elif target == root and pair_parent_calls:
+            events.append("ledger-parent-recovery")
+        real_fsync_directory(path)
+
+    def record_transition(self, pair_id, target, **kwargs):
+        if target == "committed":
+            events.append("ledger-commit")
+        return real_transition(self, pair_id, target, **kwargs)
+
+    monkeypatch.setattr(campaign_module, "fsync_directory", pair_parent_barrier)
+    monkeypatch.setattr(CampaignLedger, "transition", record_transition)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        run_campaign(
+            config, REPO, tmp_path / "runtime", artifacts, ["runner", "run"],
+            max_new_pairs=1, executor_factory=SuccessfulFixtureExecutor,
+        )
+    assert caught.value is primary
+    assert destination.is_dir()
+    run_path = next((root / "runs").glob("run-*.json"))
+    action = json.loads(run_path.read_text())["pair_actions"][-1]
+    if retry_fails:
+        assert "ledger-commit" not in events
+        assert action["action"] == "published-ledger-pending-interrupted"
+        assert action["pair_directory_durable"] is False
+        assert action["ledger_transition_durable"] is False
+        assert any("secondary pair-parent durability failure" in note for note in primary.__notes__)
+    else:
+        assert events.index("pair-parent-recovery") < events.index("ledger-commit")
+        assert events.index("ledger-commit") < events.index("ledger-parent-recovery")
+        assert action["action"] == "committed-interrupted"
+        assert action["pair_directory_durable"] is True
+        assert action["ledger_transition_durable"] is True
+
+
+@pytest.mark.parametrize("retry_fails", [False, True], ids=["retry-succeeds", "retry-fails"])
+def test_interrupt_recovery_retries_visible_ledger_parent_durability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry_fails: bool,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identity = pair_identity(config, 1)
+    monkeypatch.setattr(campaign_module, "preflight", lambda *a, **k: report(config))
+    monkeypatch.setattr(campaign_module, "EngineKitSession", lambda _: object())
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    root = campaign_root(artifacts, config)
+    pairs = root / "pairs"
+    destination = pairs / identity.pair_id
+    ledger_path = root / "campaign_ledger.json"
+    primary = KeyboardInterrupt("interrupt after visible ledger replacement")
+    events: list[str] = []
+    original_interrupted = False
+    recovery_pair_flushed = False
+    real_ledger_fsync = ledger_module.os.fsync
+    real_campaign_fsync = campaign_module.fsync_directory
+
+    def interrupt_committed_ledger_parent(descriptor: int) -> None:
+        nonlocal original_interrupted
+        descriptor_path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        if (
+            not original_interrupted
+            and stat.S_ISDIR(os.fstat(descriptor).st_mode)
+            and descriptor_path == root
+            and ledger_path.is_file()
+        ):
+            data = json.loads(ledger_path.read_text())
+            if data["pairs"][identity.pair_id]["state"] == "committed":
+                original_interrupted = True
+                events.append("ledger-parent-original-interrupt")
+                raise primary
+        real_ledger_fsync(descriptor)
+
+    def recovery_barriers(path: Path) -> None:
+        nonlocal recovery_pair_flushed
+        target = Path(path)
+        if original_interrupted and target == pairs:
+            recovery_pair_flushed = True
+            events.append("pair-parent-recovery")
+        elif original_interrupted and target == root and recovery_pair_flushed:
+            events.append("ledger-parent-recovery")
+            if retry_fails and events.count("ledger-parent-recovery") == 1:
+                raise OSError("secondary ledger-parent durability failure")
+        real_campaign_fsync(path)
+
+    monkeypatch.setattr(ledger_module.os, "fsync", interrupt_committed_ledger_parent)
+    monkeypatch.setattr(campaign_module, "fsync_directory", recovery_barriers)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        run_campaign(
+            config, REPO, tmp_path / "runtime", artifacts, ["runner", "run"],
+            max_new_pairs=1, executor_factory=SuccessfulFixtureExecutor,
+        )
+    assert caught.value is primary
+    assert destination.is_dir()
+    ledger_entry = CampaignLedger(ledger_path).load()["pairs"][identity.pair_id]
+    assert ledger_entry["state"] == "committed"
+    assert events.index("pair-parent-recovery") < events.index("ledger-parent-recovery")
+    run_path = next((root / "runs").glob("run-*.json"))
+    action = json.loads(run_path.read_text())["pair_actions"][-1]
+    if retry_fails:
+        assert action["action"] == "published-ledger-pending-interrupted"
+        assert action["ledger_transition_durable"] is False
+        assert any("secondary ledger-parent durability failure" in note for note in primary.__notes__)
+    else:
+        assert action["action"] == "committed-interrupted"
+        assert action["ledger_transition_durable"] is True
 
 
 def test_cli_returns_nonzero_for_failed_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:

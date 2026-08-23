@@ -11,6 +11,7 @@ import pytest
 from runner.sage_gnu_campaign import campaign as campaign_module
 from runner.sage_gnu_campaign import cli as cli_module
 from runner.sage_gnu_campaign import ledger as ledger_module
+from runner.sage_gnu_campaign import manifests as manifests_module
 from runner.sage_gnu_campaign.campaign import campaign_root, publish_pair, run_campaign
 from runner.sage_gnu_campaign.config import load_campaign_config
 from runner.sage_gnu_campaign.identity import pair_identity
@@ -83,6 +84,14 @@ class SuccessfulFixtureExecutor:
         output = workspace / "pair-output"
         write_execution_fixture(output, identity)
         return output
+
+
+class ExecutorMustNotRun:
+    def __init__(self, *_):
+        pass
+
+    def run(self, identity, workspace):
+        raise AssertionError(f"committed pair was unexpectedly re-executed: {identity.pair_id}")
 
 
 def test_pair_failure_persists_failed_run_and_forensics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -583,6 +592,159 @@ def test_interrupt_recovery_retries_visible_ledger_parent_durability(
     else:
         assert action["action"] == "committed-interrupted"
         assert action["ledger_transition_durable"] is True
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ["immediately-before", "during-temp-write", "after-replace", "no-active-pair"],
+)
+def test_campaign_bound_finalization_interrupt_is_run_level_and_restartable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    config = load_campaign_config(CONFIG)
+    identities = [pair_identity(config, index) for index in range(1, 11)]
+    monkeypatch.setattr(campaign_module, "preflight", lambda *a, **k: report(config))
+    monkeypatch.setattr(campaign_module, "EngineKitSession", lambda _: object())
+    clock_tick = 0
+
+    def clock() -> str:
+        nonlocal clock_tick
+        clock_tick += 1
+        return f"2026-08-23T12:{clock_tick // 60:02d}:{clock_tick % 60:02d}Z"
+
+    monkeypatch.setattr(campaign_module, "utc_now", clock)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    root = campaign_root(artifacts, config)
+    ledger_path = root / "campaign_ledger.json"
+    primary = KeyboardInterrupt(f"campaign-bound-{stage}")
+    fired = False
+
+    class FinalizationOnlyExecutor:
+        def __init__(self, *_):
+            pass
+
+        def run(self, identity, workspace):
+            output = workspace / "pair-output"
+            output.mkdir()
+            return output
+
+    def lightweight_publish(execution, artifact_root, config, identity, common, entry):
+        del execution, common, entry
+        destination = campaign_module.pair_root(artifact_root, config, identity)
+        destination.mkdir(parents=True)
+        marker = identity.base_seed.removeprefix("sha256:")
+        write_json(destination / "_COMMITTED.json", {"marker_sha256": marker})
+        return marker
+
+    def lightweight_verify(root, config, identity, benchmarker_commit, engine_kit_commit):
+        del config, benchmarker_commit, engine_kit_commit
+        marker = json.loads((Path(root) / "_COMMITTED.json").read_text())["marker_sha256"]
+        assert marker == identity.base_seed.removeprefix("sha256:")
+        return marker
+
+    monkeypatch.setattr(campaign_module, "publish_pair", lightweight_publish)
+    monkeypatch.setattr(campaign_module, "verify_committed_pair", lightweight_verify)
+
+    def all_committed() -> bool:
+        if not ledger_path.is_file():
+            return False
+        data = json.loads(ledger_path.read_text())
+        return all(
+            data["pairs"][identity.pair_id]["state"] == "committed"
+            for identity in identities
+        )
+
+    if stage in {"immediately-before", "no-active-pair"}:
+        real_finalize = campaign_module._finalize_run_manifest
+
+        def interrupt_before_bound(path, manifest, state, stop_reason):
+            nonlocal fired
+            if stop_reason == "campaign-bound-reached" and not fired:
+                assert all_committed()
+                assert len(manifest["pair_actions"]) == 10
+                assert all(action["action"] == "committed" for action in manifest["pair_actions"])
+                assert "active_pair" not in manifest
+                fired = True
+                raise primary
+            return real_finalize(path, manifest, state, stop_reason)
+
+        monkeypatch.setattr(campaign_module, "_finalize_run_manifest", interrupt_before_bound)
+    elif stage == "during-temp-write":
+        real_fsync = manifests_module.os.fsync
+
+        def interrupt_run_temp_fsync(descriptor: int) -> None:
+            nonlocal fired
+            descriptor_path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+            if (
+                not fired
+                and stat.S_ISREG(os.fstat(descriptor).st_mode)
+                and descriptor_path.name.startswith(".run-")
+                and all_committed()
+            ):
+                fired = True
+                raise primary
+            real_fsync(descriptor)
+
+        monkeypatch.setattr(manifests_module.os, "fsync", interrupt_run_temp_fsync)
+    else:
+        real_fsync_directory = manifests_module.fsync_directory
+
+        def interrupt_after_run_replace(path: Path) -> None:
+            nonlocal fired
+            target = Path(path)
+            visible_runs = list((root / "runs").glob("run-*.json")) if (root / "runs").is_dir() else []
+            visible_complete = any(
+                json.loads(run.read_text()).get("stop_reason") == "campaign-bound-reached"
+                for run in visible_runs
+            )
+            if not fired and target == root / "runs" and all_committed() and visible_complete:
+                fired = True
+                raise primary
+            real_fsync_directory(path)
+
+        monkeypatch.setattr(manifests_module, "fsync_directory", interrupt_after_run_replace)
+
+    try:
+        unexpected = run_campaign(
+            config, REPO, tmp_path / "runtime", artifacts, ["runner", "run"],
+            executor_factory=FinalizationOnlyExecutor,
+        )
+    except KeyboardInterrupt as caught:
+        assert caught is primary
+    else:
+        pytest.fail(f"campaign-bound interrupt did not fire: {unexpected!r}")
+    assert fired
+    ledger = CampaignLedger(ledger_path).load()
+    assert all(ledger["pairs"][identity.pair_id]["state"] == "committed" for identity in identities)
+    assert all((root / "pairs" / identity.pair_id).is_dir() for identity in identities)
+    interrupted_runs = [
+        json.loads(path.read_text()) for path in (root / "runs").glob("run-*.json")
+        if json.loads(path.read_text()).get("state") == "interrupted"
+    ]
+    assert len(interrupted_runs) == 1
+    interrupted = interrupted_runs[0]
+    assert len(interrupted["pair_actions"]) == 10
+    assert not any("failed" in action["action"] for action in interrupted["pair_actions"])
+    interruption = interrupted["run_interruption"]
+    assert interruption["active_pair"] is None
+    evidence_path = root / interruption["path"]
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["active_pair"] is None
+    assert evidence["committed_pair_count"] == 10
+    assert evidence["last_committed_pair_id"] == identities[-1].pair_id
+    assert evidence["authoritative_state_verification"]["status"] == "pass"
+    assert evidence["exception_type"] == "KeyboardInterrupt"
+
+    restarted = run_campaign(
+        config, REPO, tmp_path / "runtime", artifacts, ["runner", "run"],
+        executor_factory=ExecutorMustNotRun,
+    )
+    assert restarted["state"] == "complete"
+    assert restarted["stop_reason"] == "campaign-bound-reached"
+    assert len(restarted["pair_actions"]) == 10
+    assert all(action["action"] == "verified-skip" for action in restarted["pair_actions"])
+    assert evidence_path.is_file()
 
 
 def test_cli_returns_nonzero_for_failed_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:

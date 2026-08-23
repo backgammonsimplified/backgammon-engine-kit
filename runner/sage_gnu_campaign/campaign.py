@@ -455,19 +455,152 @@ def _persist_attempt_failure_preserving_primary(
 
 
 def _finalize_run_manifest(path: Path, manifest: dict[str, Any], state: str, stop_reason: str) -> dict[str, Any]:
-    manifest["state"] = state
-    manifest["stop_reason"] = stop_reason
-    manifest["state_transition_timestamps"].append(
-        {"from": "started", "to": state, "at_utc": utc_now(), "reason": stop_reason}
-    )
-    manifest["output_file_sha256"] = {
+    finalized = {
+        **manifest,
+        "state": state,
+        "stop_reason": stop_reason,
+        "state_transition_timestamps": [
+            *manifest["state_transition_timestamps"],
+            {"from": "started", "to": state, "at_utc": utc_now(), "reason": stop_reason},
+        ],
+    }
+    finalized["output_file_sha256"] = {
         action["pair_id"]: action["marker_sha256"]
         for action in manifest["pair_actions"]
         if action["action"] in {"committed", "committed-interrupted", "verified-skip"}
         and action.get("marker_sha256")
     }
-    write_json(path, manifest)
+    write_json(path, finalized)
+    manifest.clear()
+    manifest.update(finalized)
     return manifest
+
+
+def _persist_run_interruption(
+    root: Path,
+    run_manifest: Mapping[str, Any],
+    exc: KeyboardInterrupt,
+    private_roots: tuple[Path, ...],
+    verification: Mapping[str, Any],
+) -> dict[str, Any]:
+    destination = root / "run-interruptions" / str(run_manifest["run_id"])
+    _durably_create_failure_hierarchy(root, destination)
+    committed_actions = [
+        action for action in run_manifest["pair_actions"]
+        if action.get("action") in {"committed", "committed-interrupted", "verified-skip"}
+    ]
+    evidence = {
+        "schema_version": "sage-gnu-run-interruption-v1",
+        "campaign_id": run_manifest["campaign_id"],
+        "run_id": run_manifest["run_id"],
+        "phase": "campaign-bound-finalization",
+        "interrupted_at_utc": utc_now(),
+        "exception_type": type(exc).__name__,
+        "exception_message": _sanitize_failure_value(str(exc), private_roots),
+        "traceback": _sanitize_failure_value(traceback.format_exc(), private_roots),
+        "active_pair": None,
+        "committed_pair_count": len(committed_actions),
+        "last_committed_pair_id": (
+            committed_actions[-1]["pair_id"] if committed_actions else None
+        ),
+        "authoritative_state_verification": dict(verification),
+    }
+    path = destination / "interruption.json"
+    write_json(path, evidence)
+    fsync_tree(destination)
+    return {
+        "path": path.relative_to(root).as_posix(),
+        "sha256": sha256_file(path),
+        "active_pair": None,
+    }
+
+
+def _preserve_campaign_bound_interrupt(
+    *,
+    root: Path,
+    pairs: Path,
+    config: CampaignConfig,
+    ledger: CampaignLedger,
+    run_manifest_path: Path,
+    run_manifest: dict[str, Any],
+    report: Mapping[str, Any],
+    private_roots: tuple[Path, ...],
+    exc: KeyboardInterrupt,
+) -> None:
+    """Durably record a run-level interrupt after the bounded ledger is complete."""
+    verification: dict[str, Any] = {"status": "pass", "committed_pairs": []}
+    try:
+        ledger_data = ledger.load()
+        ledger.assert_authority(
+            ledger_data,
+            config,
+            report["benchmarker"]["commit"],
+            report["engine_kit"]["source_commit"],
+        )
+        for identity in all_pair_identities(config):
+            marker_hash = verify_committed_pair(
+                pairs / identity.pair_id,
+                config,
+                identity,
+                report["benchmarker"]["commit"],
+                report["engine_kit"]["source_commit"],
+            )
+            entry = ledger_data["pairs"][identity.pair_id]
+            if (
+                entry.get("state") != "committed"
+                or entry.get("committed_marker_sha256") != marker_hash
+            ):
+                raise CampaignError(
+                    "campaign-bound interrupt found pair/ledger authority conflict"
+                )
+            verification["committed_pairs"].append(
+                {"pair_id": identity.pair_id, "marker_sha256": marker_hash}
+            )
+        fsync_directory(pairs)
+        fsync_directory(ledger.path.parent)
+    except BaseException as verification_exc:
+        verification = {
+            **verification,
+            "status": "failed",
+            "error_type": type(verification_exc).__name__,
+            "error_message": _sanitize_failure_value(
+                str(verification_exc), private_roots
+            ),
+        }
+        exc.add_note(
+            "campaign-bound state verification during interrupt handling also failed: "
+            f"{type(verification_exc).__name__}: {verification_exc}"
+        )
+    try:
+        interruption = _persist_run_interruption(
+            root, run_manifest, exc, private_roots, verification
+        )
+    except BaseException as persistence_exc:
+        interruption = {
+            "status": "persistence-failed",
+            "active_pair": None,
+            "error_type": type(persistence_exc).__name__,
+            "error_message": _sanitize_failure_value(
+                str(persistence_exc), private_roots
+            ),
+        }
+        exc.add_note(
+            "run-level interruption evidence persistence also failed: "
+            f"{type(persistence_exc).__name__}: {persistence_exc}"
+        )
+    run_manifest["run_interruption"] = interruption
+    try:
+        _finalize_run_manifest(
+            run_manifest_path,
+            run_manifest,
+            "interrupted",
+            "operator-interrupt-campaign-bound-finalization",
+        )
+    except BaseException as finalization_exc:
+        exc.add_note(
+            "campaign-bound run-manifest interruption finalization also failed: "
+            f"{type(finalization_exc).__name__}: {finalization_exc}"
+        )
 
 
 def _preserve_campaign_interrupt(
@@ -833,7 +966,23 @@ def run_campaign(
                     phase="run-finalization",
                 )
                 raise
-        return _finalize_run_manifest(run_manifest_path, run_manifest, "complete", "campaign-bound-reached")
+        try:
+            return _finalize_run_manifest(
+                run_manifest_path, run_manifest, "complete", "campaign-bound-reached"
+            )
+        except KeyboardInterrupt as exc:
+            _preserve_campaign_bound_interrupt(
+                root=root,
+                pairs=pairs,
+                config=config,
+                ledger=ledger,
+                run_manifest_path=run_manifest_path,
+                run_manifest=run_manifest,
+                report=report,
+                private_roots=private_roots,
+                exc=exc,
+            )
+            raise
 
 def campaign_status(config: CampaignConfig, artifact_root: Path) -> dict[str, Any]:
     root = campaign_root(artifact_root, config)

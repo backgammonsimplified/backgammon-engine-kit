@@ -26,6 +26,7 @@ from runner.sage_gnu_campaign.match import (
     pending_double_response,
     pre_roll_cube_action,
 )
+from tests.sage_gnu_campaign.native_fixtures import native_documents
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -233,21 +234,12 @@ class FakeBoard:
             return f"Position ID: P{self.board_index}\nMatch ID: M{self.board_index}\n"
         if command.startswith("save match "):
             path = Path(command.removeprefix("save match "))
-            path.write_text(
-                "(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]"
-                "MI[length:7][game:0][ws:0][bs:0]PW[sage_seat_O]PB[gnu_seat_X]RE[W+6])\n"
-                "(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]"
-                "MI[length:7][game:1][ws:6][bs:0]PW[sage_seat_O]PB[gnu_seat_X]RE[W+2])\n",
-                encoding="utf-8",
-            )
+            sgf, _, _ = native_documents({"O": "sage", "X": "gnu"}, [("O", 6), ("O", 2)])
+            path.write_text(sgf, encoding="utf-8")
         if command.startswith("export match text "):
             path = Path(command.removeprefix("export match text "))
-            path.write_text(
-                "7 point match\n\n Game 1\n sage_seat_O : 0             gnu_seat_X : 0\n"
-                "      Wins 6 points\n\n Game 2\n sage_seat_O : 6             gnu_seat_X : 0\n"
-                "      Wins 2 points\n",
-                encoding="utf-8",
-            )
+            _, text, _ = native_documents({"O": "sage", "X": "gnu"}, [("O", 6), ("O", 2)])
+            path.write_text(text, encoding="utf-8")
         if command == "pass":
             return (
                 "gnu_seat_X refuses the cube and gives up 2 points.\n"
@@ -1143,24 +1135,8 @@ def test_opening_transition_rejects_wrong_but_changed_hidden_state(case: str) ->
 def native_pair(
     engine_by_seat: dict[str, str], games: list[tuple[str, int]],
 ) -> tuple[str, str]:
-    score = [0, 0]
-    sgf: list[str] = []
-    text = ["7 point match\n"]
-    for index, (winner, points) in enumerate(games):
-        o_name = f"{engine_by_seat['O']}_seat_O"
-        x_name = f"{engine_by_seat['X']}_seat_X"
-        result = "W" if winner == "O" else "B"
-        sgf.append(
-            "(;FF[4]GM[6]AP[GNU Backgammon:1.06.002]"
-            f"MI[length:7][game:{index}][ws:{score[0]}][bs:{score[1]}]"
-            f"PW[{o_name}]PB[{x_name}]RE[{result}+{points}])\n"
-        )
-        text.append(
-            f"\n Game {index + 1}\n {o_name} : {score[0]}             {x_name} : {score[1]}\n"
-            f"{'      ' if winner == 'O' else '                                    '}Wins {points} points\n"
-        )
-        score[0 if winner == "O" else 1] += points
-    return "".join(sgf), "".join(text)
+    sgf, text, _ = native_documents(engine_by_seat, games)
+    return sgf, text
 
 
 @pytest.mark.parametrize(

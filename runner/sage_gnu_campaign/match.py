@@ -47,7 +47,13 @@ TEXT_PLAYER_SCORE_RE = re.compile(
     r"(?im)\b([A-Za-z][A-Za-z0-9_-]*)_seat_([OX])\s*:\s*(\d+)\b"
 )
 TEXT_IDENTITY_RE = re.compile(r"(?im)\b[A-Za-z][A-Za-z0-9_-]*_seat_[OX]\s*:")
-TEXT_RESULT_RE = re.compile(r"(?im)^(?P<indent>[ \t]*)wins\s+(\d+)\s+points?\s*$")
+TEXT_RESULT_RE = re.compile(r"(?i)\bwins\s+(\d+)\s+points?\b")
+TEXT_ACTION_RE = re.compile(
+    r"(?i)(?P<checker>[1-6]{2}):\s*(?P<move>.*?)"
+    r"(?=(?:\s{2,}(?:[1-6]{2}:|Doubles\s*=>|Takes\b|Drops\b|Wins\b))|$)"
+    r"|(?P<double>Doubles)\s*=>\s*(?P<cube>\d+)"
+    r"|(?P<take>Takes)\b|(?P<drop>Drops)\b"
+)
 SGF_RESULT_RE = re.compile(r"^([WB])\+(\d+)(R(?:esign)?)?$", re.IGNORECASE)
 NO_RETURNED_RESULT = object()
 
@@ -171,8 +177,25 @@ def _validate_native_outputs(
         raise MatchExecutionError("GNU native player authority is invalid")
     sgf_games = _parse_sgf_match(sgf.strip(), expected_engine_by_seat)
     text_games = _parse_text_match(exported, expected_engine_by_seat)
-    if sgf_games != text_games:
+    if len(sgf_games) != len(text_games):
         raise MatchExecutionError("GNU SGF/text game collections or results do not match")
+    for sgf_game, text_game in zip(sgf_games, text_games):
+        text_terminal = text_game["terminal"]
+        sgf_terminal = sgf_game["terminal"]
+        shared_text_terminal = {
+            key: value for key, value in text_terminal.items() if key != "kind"
+        }
+        shared_sgf_terminal = {
+            key: value for key, value in sgf_terminal.items()
+            if key not in {"kind", "resignation_recorded"}
+        }
+        if (
+            {key: value for key, value in sgf_game.items() if key != "terminal"}
+            != {key: value for key, value in text_game.items() if key != "terminal"}
+            or shared_sgf_terminal != shared_text_terminal
+            or (sgf_terminal["kind"] == "drop") != (text_terminal["kind"] == "drop")
+        ):
+            raise MatchExecutionError("GNU SGF/text complete ordered game semantics do not match")
     return {"game_count": len(sgf_games), "games": sgf_games, "final_score": sgf_games[-1]["post_score"]}
 
 
@@ -216,50 +239,69 @@ def _split_sgf_collection(value: str) -> list[str]:
 
 
 def _sgf_root_properties(tree: str) -> dict[str, list[str]]:
+    return _sgf_linear_nodes(tree)[0]
+
+
+def _sgf_linear_nodes(tree: str) -> list[dict[str, list[str]]]:
+    """Parse one variation-free GNU game tree without discarding move nodes."""
+    if not tree.startswith("(") or not tree.endswith(")"):
+        raise MatchExecutionError("GNU saved SGF game tree is malformed")
     index = 1
-    while index < len(tree) and tree[index].isspace():
-        index += 1
-    if index >= len(tree) or tree[index] != ";":
-        raise MatchExecutionError("GNU saved SGF game tree lacks a root node")
-    index += 1
-    properties: dict[str, list[str]] = {}
-    while index < len(tree):
-        while index < len(tree) and tree[index].isspace():
+    limit = len(tree) - 1
+    nodes: list[dict[str, list[str]]] = []
+    while index < limit:
+        while index < limit and tree[index].isspace():
             index += 1
-        if index >= len(tree) or tree[index] in ";()":
+        if index >= limit:
             break
-        name_start = index
-        while index < len(tree) and tree[index].isalpha() and tree[index].isupper():
-            index += 1
-        name = tree[name_start:index]
-        if not name or index >= len(tree) or tree[index] != "[":
-            raise MatchExecutionError("GNU saved SGF root property is malformed")
-        values: list[str] = []
-        while index < len(tree) and tree[index] == "[":
-            index += 1
-            characters: list[str] = []
-            while index < len(tree):
-                character = tree[index]
+        if tree[index] != ";":
+            raise MatchExecutionError("GNU saved SGF contains a variation or malformed node sequence")
+        index += 1
+        properties: dict[str, list[str]] = {}
+        while index < limit:
+            while index < limit and tree[index].isspace():
                 index += 1
-                if character == "\\":
-                    if index >= len(tree):
-                        raise MatchExecutionError("GNU saved SGF property escape is truncated")
-                    escaped = tree[index]
+            if index >= limit or tree[index] == ";":
+                break
+            if tree[index] in "()":
+                raise MatchExecutionError("GNU saved SGF contains a variation or malformed node sequence")
+            name_start = index
+            while index < limit and "A" <= tree[index] <= "Z":
+                index += 1
+            name = tree[name_start:index]
+            if not name or index >= limit or tree[index] != "[":
+                raise MatchExecutionError("GNU saved SGF property is malformed")
+            values: list[str] = []
+            while index < limit and tree[index] == "[":
+                index += 1
+                characters: list[str] = []
+                while index < limit:
+                    character = tree[index]
                     index += 1
-                    if escaped in "\r\n":
-                        continue
-                    characters.append(escaped)
-                elif character == "]":
-                    break
+                    if character == "\\":
+                        if index >= limit:
+                            raise MatchExecutionError("GNU saved SGF property escape is truncated")
+                        escaped = tree[index]
+                        index += 1
+                        if escaped in "\r\n":
+                            continue
+                        characters.append(escaped)
+                    elif character == "]":
+                        break
+                    else:
+                        characters.append(character)
                 else:
-                    characters.append(character)
-            else:
-                raise MatchExecutionError("GNU saved SGF property is truncated")
-            values.append("".join(characters))
-        if name in properties:
-            raise MatchExecutionError(f"GNU saved SGF duplicates root property {name}")
-        properties[name] = values
-    return properties
+                    raise MatchExecutionError("GNU saved SGF property is truncated")
+                values.append("".join(characters))
+            if name in properties:
+                raise MatchExecutionError(f"GNU saved SGF duplicates node property {name}")
+            properties[name] = values
+        if not properties:
+            raise MatchExecutionError("GNU saved SGF contains an empty node")
+        nodes.append(properties)
+    if not nodes:
+        raise MatchExecutionError("GNU saved SGF game tree lacks a root node")
+    return nodes
 
 
 def _one_sgf_property(properties: Mapping[str, list[str]], name: str) -> str:
@@ -267,6 +309,155 @@ def _one_sgf_property(properties: Mapping[str, list[str]], name: str) -> str:
     if values is None or len(values) != 1:
         raise MatchExecutionError(f"GNU saved SGF requires exactly one {name} property")
     return values[0]
+
+
+def _sgf_point(value: str, seat: str) -> str:
+    if value == "y":
+        return "bar"
+    if value == "z":
+        return "off"
+    if len(value) != 1 or not "a" <= value <= "x":
+        raise MatchExecutionError("GNU saved SGF checker move has an invalid point")
+    offset = ord(value) - ord("a")
+    return str(offset + 1 if seat == "O" else 24 - offset)
+
+
+def _parse_sgf_actions(nodes: list[dict[str, list[str]]]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    if len(nodes) < 2:
+        raise MatchExecutionError("GNU saved SGF game has no played action body")
+    for node in nodes[1:]:
+        move_properties = [name for name in ("W", "B") if name in node]
+        if len(move_properties) != 1:
+            raise MatchExecutionError("GNU saved SGF action node lacks one exact player move")
+        property_name = move_properties[0]
+        raw = _one_sgf_property(node, property_name)
+        seat = "O" if property_name == "W" else "X"
+        lowered = raw.lower()
+        if lowered in {"double", "take", "drop"}:
+            actions.append({"action": lowered, "physical_seat": seat})
+            continue
+        if len(raw) < 2 or not raw[:2].isdigit() or any(character not in "123456" for character in raw[:2]):
+            raise MatchExecutionError("GNU saved SGF checker action lacks exact dice")
+        encoded_moves = raw[2:]
+        if len(encoded_moves) % 2 or len(encoded_moves) > 8:
+            raise MatchExecutionError("GNU saved SGF checker action has malformed ordered moves")
+        moves = [
+            [_sgf_point(encoded_moves[offset], seat), _sgf_point(encoded_moves[offset + 1], seat)]
+            for offset in range(0, len(encoded_moves), 2)
+        ]
+        actions.append({
+            "action": "checker",
+            "physical_seat": seat,
+            "dice": [int(raw[0]), int(raw[1])],
+            "moves": moves,
+        })
+    return actions
+
+
+def _parse_text_moves(value: str) -> list[list[str]]:
+    rendered = value.strip()
+    if rendered.lower() == "cannot move":
+        return []
+    if not rendered:
+        raise MatchExecutionError("GNU exported match text checker action lacks ordered moves")
+    moves: list[list[str]] = []
+    for token in rendered.split():
+        repetition = 1
+        repeated = re.fullmatch(r"(.+?)\((\d+)\)", token)
+        if repeated is not None:
+            token = repeated.group(1)
+            repetition = int(repeated.group(2))
+            if not 2 <= repetition <= 4:
+                raise MatchExecutionError("GNU exported match text has an invalid move repetition")
+        components = [part.rstrip("*").lower() for part in token.split("/")]
+        if len(components) < 2 or any(
+            part not in {"bar", "off"} and (not part.isdigit() or not 1 <= int(part) <= 24)
+            for part in components
+        ):
+            raise MatchExecutionError("GNU exported match text has malformed checker notation")
+        expanded = [[source, destination] for source, destination in zip(components, components[1:])]
+        moves.extend(expanded * repetition)
+    if len(moves) > 4:
+        raise MatchExecutionError("GNU exported match text checker action has too many ordered moves")
+    return moves
+
+
+def _validate_action_structure(
+    actions: list[dict[str, Any]], winner_seat: str, points: int, terminal_kind: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """Enrich and validate the linear normal-match action/cube state machine."""
+    if not actions or actions[0].get("action") != "checker":
+        raise MatchExecutionError("GNU native game lacks a checker-play opening action")
+    if actions[0].get("dice", [0, 0])[0] == actions[0].get("dice", [0, 0])[1]:
+        raise MatchExecutionError("GNU native game opening action uses tied dice")
+    expected = actions[0]["physical_seat"]
+    cube_value = 1
+    cube_owner = "center"
+    pending_doubler: str | None = None
+    enriched: list[dict[str, Any]] = []
+    for ordinal, action in enumerate(actions, 1):
+        kind = action.get("action")
+        seat = action.get("physical_seat")
+        if seat not in {"O", "X"} or seat != expected:
+            raise MatchExecutionError("GNU native game action actor/order is invalid")
+        event = {**action, "action_ordinal": ordinal, "cube_value_before": cube_value}
+        if kind == "checker":
+            if pending_doubler is not None:
+                raise MatchExecutionError("GNU native checker action precedes a cube response")
+            dice = action.get("dice")
+            moves = action.get("moves")
+            if (
+                not isinstance(dice, list) or len(dice) != 2
+                or any(type(die) is not int or not 1 <= die <= 6 for die in dice)
+                or not isinstance(moves, list)
+            ):
+                raise MatchExecutionError("GNU native checker action is malformed")
+            expected = "X" if seat == "O" else "O"
+        elif kind == "double":
+            if pending_doubler is not None or cube_owner not in {"center", seat}:
+                raise MatchExecutionError("GNU native double action has invalid cube ownership")
+            recorded_offer = event.pop("recorded_cube_value", None)
+            if recorded_offer is not None and recorded_offer != cube_value * 2:
+                raise MatchExecutionError("GNU exported match text records the wrong offered cube value")
+            pending_doubler = seat
+            expected = "X" if seat == "O" else "O"
+            event["cube_value_offered"] = cube_value * 2
+        elif kind == "take":
+            if pending_doubler is None or seat == pending_doubler:
+                raise MatchExecutionError("GNU native take action lacks the matching double")
+            cube_value *= 2
+            cube_owner = seat
+            expected = pending_doubler
+            pending_doubler = None
+            event["cube_value_after"] = cube_value
+            event["cube_owner_after"] = cube_owner
+        elif kind == "drop":
+            if pending_doubler is None or seat == pending_doubler:
+                raise MatchExecutionError("GNU native drop action lacks the matching double")
+            event["cube_value_declined"] = cube_value * 2
+            pending_doubler = None
+        else:
+            raise MatchExecutionError("GNU native game contains an unsupported action")
+        enriched.append(event)
+    if pending_doubler is not None:
+        raise MatchExecutionError("GNU native game ends with an unanswered double")
+    last = enriched[-1]
+    if terminal_kind == "drop":
+        if last["action"] != "drop" or last["physical_seat"] == winner_seat or points != cube_value:
+            raise MatchExecutionError("GNU native drop terminal conflicts with action/cube history")
+        result_level = 1
+    elif terminal_kind in {"ordinary_game_over", "resignation", "unspecified_completion"}:
+        if last["action"] == "drop" or terminal_kind == "ordinary_game_over" and (
+            last["action"] != "checker" or last["physical_seat"] != winner_seat
+        ):
+            raise MatchExecutionError("GNU native completion conflicts with its terminal action")
+        if points % cube_value or not 1 <= points // cube_value <= 3:
+            raise MatchExecutionError("GNU native completion points conflict with cube history")
+        result_level = points // cube_value
+    else:
+        raise MatchExecutionError("GNU native game has an unknown terminal kind")
+    return enriched, result_level
 
 
 def _parse_sgf_match(value: str, expected_engine_by_seat: Mapping[str, str]) -> list[dict[str, Any]]:
@@ -277,7 +468,8 @@ def _parse_sgf_match(value: str, expected_engine_by_seat: Mapping[str, str]) -> 
         "PB": f"{expected_engine_by_seat['X']}_seat_X",
     }
     for index, tree in enumerate(_split_sgf_collection(value)):
-        properties = _sgf_root_properties(tree)
+        nodes = _sgf_linear_nodes(tree)
+        properties = nodes[0]
         if (
             _one_sgf_property(properties, "FF") != "4"
             or _one_sgf_property(properties, "GM") != "6"
@@ -306,11 +498,35 @@ def _parse_sgf_match(value: str, expected_engine_by_seat: Mapping[str, str]) -> 
         points = int(result_match.group(2))
         if points <= 0:
             raise MatchExecutionError("GNU saved SGF game result has invalid points")
+        actions = _parse_sgf_actions(nodes)
+        terminal_kind = (
+            "resignation" if result_match.group(3) is not None
+            else "drop" if actions[-1]["action"] == "drop"
+            else "ordinary_game_over"
+        )
+        actions, result_level = _validate_action_structure(
+            actions, winner_seat, points, terminal_kind
+        )
         start_score = list(score)
         score[0 if winner_seat == "O" else 1] += points
         games.append({
             "game_number": index + 1,
+            "players_by_physical_seat": dict(expected_engine_by_seat),
             "start_score": start_score,
+            "opening_state": {
+                "cube_value": 1,
+                "on_roll_physical_seat": actions[0]["physical_seat"],
+                "dice": actions[0]["dice"],
+            },
+            "actions": actions,
+            "terminal": {
+                "kind": terminal_kind,
+                "winner_physical_seat": winner_seat,
+                "winner_engine": expected_engine_by_seat[winner_seat],
+                "points": points,
+                "result_level": result_level,
+                "resignation_recorded": terminal_kind == "resignation",
+            },
             "winner_physical_seat": winner_seat,
             "winner_engine": expected_engine_by_seat[winner_seat],
             "points": points,
@@ -319,6 +535,42 @@ def _parse_sgf_match(value: str, expected_engine_by_seat: Mapping[str, str]) -> 
     if max(score) < 7:
         raise MatchExecutionError("GNU saved SGF does not contain a complete seven-point match")
     return games
+
+
+def _text_action_actor(column: int, player_columns: Mapping[str, int]) -> str:
+    distances = {seat: abs(column - player_columns[seat]) for seat in ("O", "X")}
+    if distances["O"] == distances["X"]:
+        raise MatchExecutionError("GNU exported match text action column is ambiguous")
+    return min(distances, key=distances.get)
+
+
+def _parse_text_actions(block: str, player_columns: Mapping[str, int]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for line in block.splitlines():
+        for match in TEXT_ACTION_RE.finditer(line):
+            seat = _text_action_actor(match.start(), player_columns)
+            if match.group("checker") is not None:
+                move_text = match.group("move").strip()
+                # A dice-only MOVE_SETDICE record can precede resignation and is
+                # stronger text-only evidence, but it is not a played SGF move.
+                if not move_text:
+                    continue
+                actions.append({
+                    "action": "checker",
+                    "physical_seat": seat,
+                    "dice": [int(match.group("checker")[0]), int(match.group("checker")[1])],
+                    "moves": _parse_text_moves(move_text),
+                })
+            elif match.group("double") is not None:
+                actions.append({
+                    "action": "double", "physical_seat": seat,
+                    "recorded_cube_value": int(match.group("cube")),
+                })
+            elif match.group("take") is not None:
+                actions.append({"action": "take", "physical_seat": seat})
+            elif match.group("drop") is not None:
+                actions.append({"action": "drop", "physical_seat": seat})
+    return actions
 
 
 def _parse_text_match(value: str, expected_engine_by_seat: Mapping[str, str]) -> list[dict[str, Any]]:
@@ -365,10 +617,11 @@ def _parse_text_match(value: str, expected_engine_by_seat: Mapping[str, str]) ->
         if len(result_matches) != 1:
             raise MatchExecutionError("GNU exported match text lacks one exact result per game")
         result = result_matches[0]
-        points = int(result.group(2))
+        points = int(result.group(1))
         if points <= 0:
             raise MatchExecutionError("GNU exported match text has invalid result points")
-        result_column = len(result.group("indent").expandtabs())
+        result_line_start = block.rfind("\n", 0, result.start()) + 1
+        result_column = len(block[result_line_start:result.start()].expandtabs())
         player_columns = {seat: by_seat[seat].start() for seat in ("O", "X")}
         distances = {seat: abs(column - result_column) for seat, column in player_columns.items()}
         if (
@@ -377,11 +630,30 @@ def _parse_text_match(value: str, expected_engine_by_seat: Mapping[str, str]) ->
         ):
             raise MatchExecutionError("GNU exported match text result column or ordering is ambiguous")
         winner_seat = min(distances, key=distances.get)
+        actions = _parse_text_actions(block, player_columns)
+        terminal_kind = "drop" if actions and actions[-1]["action"] == "drop" else "unspecified_completion"
+        actions, result_level = _validate_action_structure(
+            actions, winner_seat, points, terminal_kind
+        )
         start_score = list(score)
         score[0 if winner_seat == "O" else 1] += points
         games.append({
             "game_number": index + 1,
+            "players_by_physical_seat": dict(expected_engine_by_seat),
             "start_score": start_score,
+            "opening_state": {
+                "cube_value": 1,
+                "on_roll_physical_seat": actions[0]["physical_seat"],
+                "dice": actions[0]["dice"],
+            },
+            "actions": actions,
+            "terminal": {
+                "kind": terminal_kind,
+                "winner_physical_seat": winner_seat,
+                "winner_engine": expected_engine_by_seat[winner_seat],
+                "points": points,
+                "result_level": result_level,
+            },
             "winner_physical_seat": winner_seat,
             "winner_engine": expected_engine_by_seat[winner_seat],
             "points": points,

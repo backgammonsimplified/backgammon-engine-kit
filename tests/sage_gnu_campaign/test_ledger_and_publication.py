@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -195,6 +196,16 @@ def test_publication_accepts_complete_real_shaped_multi_game_native_evidence(tmp
         "decision-game-count-mismatch",
         "decision-result-mismatch",
         "match-manifest-result-mismatch",
+        "same-result-different-checker-move",
+        "same-result-different-dice-sequence",
+        "same-result-different-cube-action",
+        "same-result-different-terminal-action",
+        "root-only-sgf-with-result",
+        "result-only-text-with-result",
+        "reordered-actions",
+        "missing-move",
+        "extra-move",
+        "action-belongs-to-wrong-game",
     ],
 )
 def test_publication_rejects_incomplete_or_cross_format_native_game_evidence(
@@ -274,6 +285,39 @@ def test_publication_rejects_incomplete_or_cross_format_native_game_evidence(
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["native_evidence"]["games"][0]["points"] = 3
         write_json(manifest_path, manifest)
+    elif case == "same-result-different-checker-move":
+        text_path.write_text(text.replace("31: 8/5 6/5", "31: 8/4 6/5", 1), encoding="utf-8")
+    elif case == "same-result-different-dice-sequence":
+        text_path.write_text(text.replace("31: 8/5 6/5", "32: 8/5 6/5", 1), encoding="utf-8")
+    elif case == "same-result-different-cube-action":
+        text_path.write_text(text.replace("Doubles => 2                Takes", "Doubles => 2                Drops", 1), encoding="utf-8")
+    elif case == "same-result-different-terminal-action":
+        text_path.write_text(text.replace("65: 6/off 5/off", "Drops", 1), encoding="utf-8")
+    elif case == "root-only-sgf-with-result":
+        trees = sgf_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        trees[0] = re.sub(r";[WB]\[[^\n]*", ")\n", trees[0], count=1)
+        sgf_path.write_text("".join(trees), encoding="utf-8")
+    elif case == "result-only-text-with-result":
+        first_result = text.index("      Wins 2 points")
+        first_actions = text.index("  1)", text.index(" Game 1"))
+        text_path.write_text(text[:first_actions] + text[first_result:], encoding="utf-8")
+    elif case == "reordered-actions":
+        text_path.write_text(
+            text.replace(
+                "31: 8/5 6/5                 42: 13/9 6/4",
+                "42: 13/9 6/4                31: 8/5 6/5",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif case == "missing-move":
+        text_path.write_text(text.replace("31: 8/5 6/5", "31: 8/5", 1), encoding="utf-8")
+    elif case == "extra-move":
+        text_path.write_text(text.replace("31: 8/5 6/5", "31: 8/5 6/5 13/10", 1), encoding="utf-8")
+    elif case == "action-belongs-to-wrong-game":
+        text_path.write_text(
+            text.replace("31: 8/5 6/5", "52: 13/8 8/6", 1), encoding="utf-8"
+        )
     else:  # pragma: no cover
         raise AssertionError(case)
 
